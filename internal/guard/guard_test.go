@@ -113,3 +113,26 @@ func TestExtractTables(t *testing.T) {
 		})
 	}
 }
+
+func TestMatcher(t *testing.T) {
+	m := newMatcher([]string{"myapp.*", "shop.orders", "app_*.logs"})
+	allow := []string{"myapp.users", "myapp.t1", "shop.orders", "app_1.logs", "app_prod.logs"}
+	deny := []string{"shop.users", "secret.t", "app_1.users", "mysql.user", "shoporders.x"}
+	for _, s := range allow {
+		if !m.allowed(s) {
+			t.Errorf("%s should be allowed", s)
+		}
+	}
+	for _, s := range deny {
+		if m.allowed(s) {
+			t.Errorf("%s should be denied", s)
+		}
+	}
+}
+
+func TestMatcherEmptyDeniesAll(t *testing.T) {
+	m := newMatcher(nil)
+	if m.allowed("myapp.t1") {
+		t.Error("empty whitelist must deny everything")
+	}
+}
