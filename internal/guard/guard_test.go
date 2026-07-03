@@ -5,9 +5,12 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
+
+	"github.com/Kurok1/mcp-server-mysql/internal/config"
 )
 
 func mustParseOne(t *testing.T, sql string) ast.StmtNode {
@@ -134,5 +137,111 @@ func TestMatcherEmptyDeniesAll(t *testing.T) {
 	m := newMatcher(nil)
 	if m.allowed("myapp.t1") {
 		t.Error("empty whitelist must deny everything")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// gRO: 默认只读配置；gRW: 全开配置。白名单均为 myapp.* + shop.orders。
+func testGuards(t *testing.T) (gRO, gRW *Guard) {
+	t.Helper()
+	roCfg := config.SecurityConfig{
+		AllowedStatements: []string{"select"},
+		TableWhitelist:    []string{"myapp.*", "shop.orders"},
+	}
+	rwCfg := config.SecurityConfig{
+		AllowedStatements:     []string{"select", "insert", "update", "delete", "ddl"},
+		TableWhitelist:        []string{"myapp.*", "shop.orders"},
+		BlockUnfilteredWrites: boolPtr(true),
+	}
+	return New(roCfg, "myapp"), New(rwCfg, "myapp")
+}
+
+func TestCheckPipeline(t *testing.T) {
+	gRO, gRW := testGuards(t)
+	cases := []struct {
+		name     string
+		g        *Guard
+		sql      string
+		tool     Tool
+		allowed  bool
+		wantRule string // 拒绝时期望命中的规则
+	}{
+		// ---- 放行 ----
+		{"简单查询", gRO, "SELECT id FROM t1 WHERE id = 1", ToolQuery, true, ""},
+		{"白名单内 JOIN", gRO, "SELECT * FROM t1 JOIN shop.orders o ON t1.id = o.uid", ToolQuery, true, ""},
+		{"CTE 查询", gRO, "WITH x AS (SELECT id FROM t1) SELECT * FROM x", ToolQuery, true, ""},
+		{"SHOW TABLES", gRO, "SHOW TABLES", ToolQuery, true, ""},
+		{"EXPLAIN", gRO, "EXPLAIN SELECT * FROM t1", ToolQuery, true, ""},
+		{"字符串里的分号不算多语句", gRO, "SELECT ';drop table x;' AS s FROM t1", ToolQuery, true, ""},
+		{"允许的写", gRW, "INSERT INTO t1 (a) VALUES (1)", ToolExecute, true, ""},
+		{"带 WHERE 的 UPDATE", gRW, "UPDATE t1 SET a = 1 WHERE id = 1", ToolExecute, true, ""},
+		{"允许的 DDL", gRW, "CREATE TABLE t9 (id INT)", ToolExecute, true, ""},
+		// ---- 解析与多语句 ----
+		{"语法错误 fail-closed", gRO, "SELEKT 1", ToolQuery, false, "parse_error"},
+		{"空输入", gRO, "  ", ToolQuery, false, "parse_error"},
+		{"多语句注入", gRO, "SELECT 1; DELETE FROM t1", ToolQuery, false, "multi_statement"},
+		{"COMMIT 前缀注入", gRO, "COMMIT; DROP TABLE t1", ToolQuery, false, "multi_statement"},
+		// ---- 语句类型 ----
+		{"SET 无条件拒", gRO, "SET GLOBAL max_connections = 1", ToolQuery, false, "unsupported_statement"},
+		{"GRANT 无条件拒", gRW, "GRANT SELECT ON *.* TO 'u'@'%'", ToolExecute, false, "unsupported_statement"},
+		{"CALL 无条件拒", gRW, "CALL p()", ToolExecute, false, "unsupported_statement"},
+		{"USE 无条件拒", gRO, "USE secret", ToolQuery, false, "unsupported_statement"},
+		{"单独 COMMIT 拒", gRW, "COMMIT", ToolExecute, false, "unsupported_statement"},
+		// ---- 工具交叉校验 ----
+		{"query 工具收到写语句", gRW, "DELETE FROM t1 WHERE id = 1", ToolQuery, false, "wrong_tool"},
+		{"execute 工具收到读语句", gRW, "SELECT * FROM t1", ToolExecute, false, "wrong_tool"},
+		{"版本化注释藏 DELETE 走 query 工具", gRW, "/*!80000 DELETE FROM t1 WHERE id = 1 */", ToolQuery, false, "wrong_tool"},
+		// ---- 分级开关 ----
+		{"只读配置拒 INSERT", gRO, "INSERT INTO t1 (a) VALUES (1)", ToolExecute, false, "statement_not_enabled"},
+		{"只读配置拒 DDL", gRO, "DROP TABLE t1", ToolExecute, false, "statement_not_enabled"},
+		{"EXPLAIN ANALYZE 写语句按写管控", gRO, "EXPLAIN ANALYZE UPDATE t1 SET a = 1 WHERE id = 1", ToolQuery, false, "wrong_tool"},
+		// ---- 白名单 ----
+		{"白名单外的表", gRO, "SELECT * FROM secret.t", ToolQuery, false, "table_whitelist"},
+		{"JOIN 混入白名单外表", gRO, "SELECT * FROM t1 JOIN secret.t s ON 1 = 1", ToolQuery, false, "table_whitelist"},
+		{"子查询混入白名单外表", gRO, "SELECT * FROM t1 WHERE id IN (SELECT id FROM mysql.user)", ToolQuery, false, "table_whitelist"},
+		{"多表 UPDATE 混入白名单外表", gRW, "UPDATE t1 JOIN secret.t s ON t1.id = s.id SET t1.a = 1 WHERE s.b = 2", ToolExecute, false, "table_whitelist"},
+		{"INSERT SELECT 读白名单外表", gRW, "INSERT INTO t1 SELECT * FROM secret.t", ToolExecute, false, "table_whitelist"},
+		{"CTE 别名不能洗白带库名引用", gRO, "WITH secret AS (SELECT 1) SELECT * FROM secret UNION SELECT 1 FROM mysql.user", ToolQuery, false, "table_whitelist"},
+		{"版本化注释藏白名单外表", gRO, "SELECT 1 FROM t1 /*!80000 JOIN mysql.user u ON 1 = 1 */", ToolQuery, false, "table_whitelist"},
+		{"shop 库仅放行 orders", gRO, "SELECT * FROM shop.users", ToolQuery, false, "table_whitelist"},
+		// ---- 危险构造 ----
+		{"INTO OUTFILE", gRO, "SELECT * FROM t1 INTO OUTFILE '/tmp/x'", ToolQuery, false, "dangerous_construct"},
+		// TiDB parser 不支持 INTO DUMPFILE 语法 → 解析失败，fail-closed 同样拦截
+		{"INTO DUMPFILE", gRO, "SELECT * FROM t1 INTO DUMPFILE '/tmp/x'", ToolQuery, false, "parse_error"},
+		{"LOAD_FILE 函数", gRO, "SELECT LOAD_FILE('/etc/passwd') FROM t1", ToolQuery, false, "dangerous_construct"},
+		// ---- 无过滤写 ----
+		{"无 WHERE 的 UPDATE", gRW, "UPDATE t1 SET a = 1", ToolExecute, false, "unfiltered_write"},
+		{"无 WHERE 的 DELETE", gRW, "DELETE FROM t1", ToolExecute, false, "unfiltered_write"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := c.g.Check(c.sql, c.tool)
+			if d.Allowed != c.allowed {
+				t.Fatalf("Allowed = %v, want %v (rule=%s reason=%s)", d.Allowed, c.allowed, d.Rule, d.Reason)
+			}
+			if !c.allowed && d.Rule != c.wantRule {
+				t.Errorf("Rule = %s, want %s (reason=%s)", d.Rule, c.wantRule, d.Reason)
+			}
+		})
+	}
+}
+
+func TestDeniedText(t *testing.T) {
+	gRO, _ := testGuards(t)
+	d := gRO.Check("SELECT * FROM secret.t", ToolQuery)
+	got := d.DeniedText()
+	if !strings.Contains(got, "DENIED [table_whitelist]") || !strings.Contains(got, "secret.t") {
+		t.Errorf("DeniedText() = %q", got)
+	}
+}
+
+func TestTableAllowed(t *testing.T) {
+	gRO, _ := testGuards(t)
+	if !gRO.TableAllowed("myapp", "users") {
+		t.Error("myapp.users should be allowed")
+	}
+	if gRO.TableAllowed("secret", "t") {
+		t.Error("secret.t should be denied")
 	}
 }
