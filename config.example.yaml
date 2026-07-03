@@ -1,0 +1,24 @@
+# @author Kurok1 <im.kurokyhanc@gmail.com>
+# @since 0.1.0
+mysql:
+  host: 127.0.0.1          # Docker 内连宿主机改用 host.docker.internal
+  port: 3306
+  user: mcp_dev            # 建议专用最小权限账号，勿用 root
+  password: ${MYSQL_MCP_PASSWORD}
+  database: myapp
+  pool:
+    max_open: 5
+    max_idle: 2
+
+security:
+  allowed_statements: [select]   # select/insert/update/delete/ddl，默认只读
+  table_whitelist:               # 默认拒绝一切，按需放行
+    - "myapp.*"
+  max_rows: 1000
+  query_timeout: 30s
+  block_unfiltered_writes: true
+
+audit:
+  log_dir: ~/.mcp-server-mysql/logs   # Docker 运行时务必指向挂载卷，如 /data/logs
+  slow_query_threshold: 1s
+  ring_buffer_size: 1000
