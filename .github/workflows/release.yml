@@ -66,6 +66,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # 默认 latest=auto 只给正式版 semver 打 latest，rc 等预发布版会被跳过；
+          # 显式 latest=true 让 latest 始终指向最新一次 tag 构建
+          flavor: |
+            latest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
