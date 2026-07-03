@@ -1,0 +1,19 @@
+# 构建产物
+/mcp-server-mysql
+/dist/
+
+# 日志与审计
+*.log
+*.jsonl
+
+# 测试
+coverage.out
+
+# 本地配置（防止真实连接信息入库）
+/config.yaml
+/config.local.yaml
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
