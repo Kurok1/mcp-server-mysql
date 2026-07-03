@@ -74,3 +74,42 @@ func TestClassify(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTables(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string // 顺序无关，用集合比较
+	}{
+		{"简单查询补全默认库", "SELECT * FROM t1", []string{"myapp.t1"}},
+		{"显式库名", "SELECT * FROM db2.t2", []string{"db2.t2"}},
+		{"JOIN 混合", "SELECT * FROM t1 JOIN db2.t2 ON t1.id = t2.id", []string{"myapp.t1", "db2.t2"}},
+		{"WHERE 子查询", "SELECT * FROM t1 WHERE id IN (SELECT id FROM db2.t2)", []string{"myapp.t1", "db2.t2"}},
+		{"派生表", "SELECT * FROM (SELECT id FROM db2.t2) AS d", []string{"db2.t2"}},
+		{"CTE 引用不算表", "WITH x AS (SELECT id FROM t1) SELECT * FROM x", []string{"myapp.t1"}},
+		{"递归 CTE", "WITH RECURSIVE cte (n) AS (SELECT 1 UNION ALL SELECT n+1 FROM cte WHERE n < 5) SELECT * FROM cte", nil},
+		{"CTE 同名但带库名的真实表不豁免", "WITH secret AS (SELECT 1) SELECT * FROM secret UNION SELECT 1 FROM db2.secret", []string{"db2.secret"}},
+		{"多表 UPDATE", "UPDATE t1 JOIN db2.t2 ON t1.id = t2.id SET t1.a = 1 WHERE t2.b = 2", []string{"myapp.t1", "db2.t2"}},
+		{"INSERT SELECT 跨表", "INSERT INTO t1 SELECT * FROM db2.t2", []string{"myapp.t1", "db2.t2"}},
+		{"反引号与大小写归一", "SELECT * FROM `MyDB`.`T1`", []string{"mydb.t1"}},
+		{"版本化注释里的表逃不掉", "SELECT * FROM t1 /*!80000 JOIN db2.t2 ON 1 = 1 */", []string{"myapp.t1", "db2.t2"}},
+		{"SHOW 指定表", "SHOW COLUMNS FROM db2.t2", []string{"db2.t2"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ExtractTables(mustParseOne(t, c.sql), "myapp")
+			gotSet := map[string]bool{}
+			for _, g := range got {
+				gotSet[g] = true
+			}
+			if len(gotSet) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for _, w := range c.want {
+				if !gotSet[w] {
+					t.Errorf("missing %s in %v", w, got)
+				}
+			}
+		})
+	}
+}
