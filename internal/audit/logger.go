@@ -17,8 +17,10 @@ import (
 )
 
 // Logger 负责 JSONL 落盘（按记录日期滚动）与环形缓冲统计。
+// enabled 为 false 时只维护环形缓冲（供 mysql_stats），不落盘、不建目录。
 type Logger struct {
 	mu            sync.Mutex
+	enabled       bool
 	dir           string
 	slowThreshold time.Duration
 	ring          *ring
@@ -27,10 +29,13 @@ type Logger struct {
 }
 
 func NewLogger(cfg config.AuditConfig) (*Logger, error) {
-	if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
-		return nil, fmt.Errorf("创建审计日志目录: %w", err)
+	if cfg.Enabled {
+		if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
+			return nil, fmt.Errorf("创建审计日志目录: %w", err)
+		}
 	}
 	return &Logger{
+		enabled:       cfg.Enabled,
 		dir:           cfg.LogDir,
 		slowThreshold: time.Duration(cfg.SlowQueryThreshold),
 		ring:          newRing(cfg.RingBufferSize),
@@ -46,6 +51,11 @@ func (l *Logger) Log(rec Record) {
 		rec.Slow = true
 	}
 	l.ring.add(rec)
+
+	// 环形缓冲（mysql_stats）始终维护；仅落盘受 enabled 门控。
+	if !l.enabled {
+		return
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
