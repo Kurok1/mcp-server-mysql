@@ -114,6 +114,13 @@ func (g *Guard) Check(sql string, tool Tool) Decision {
 		return deny("wrong_tool", "读语句请使用 mysql_query 工具")
 	}
 
+	return g.checkClassified(stmt, class)
+}
+
+// checkClassified 执行分级开关、危险构造、无过滤写与白名单校验（不含工具交叉校验）。
+// Check 与 CheckScript 共用；调用方需先完成 classify 与（如需要）wrong_tool 判定。
+func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
+	isRead := class == ClassSelect || class == ClassUtility
 	if isRead {
 		if !g.allowed[ClassSelect] {
 			return deny("statement_not_enabled", "select 未在 allowed_statements 中启用")
