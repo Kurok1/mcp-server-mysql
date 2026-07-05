@@ -78,6 +78,16 @@ runExplainTree(ctx, sql)
   - `format=tree` + 多语句 → 拒（`invalid_query`）
 - **回归**：traditional/json/analyze 既有 E2E 全绿。
 
-## 6. 版本
+## 6. 附带安全修复：CTE 作用域白名单绕过
 
-→ **1.2.0**（`VERSION` + MCP `Implementation.Version`）。
+在对 §2.3 的 tree 旁路做对抗性安全评审时，独立 agent 挖出一个**与 tree 无关、从 v1.0.0 就存在**的白名单绕过，并经本地实测确认。一并在 v1.2.0 修复。
+
+- **根因**：`internal/guard/tables.go` 的 `ExtractTables` 把整棵 AST 里所有 WITH 定义的 CTE 名收进一个**扁平全局集合**，再跳过任何未限定库名、命中该集合的表引用。但 MySQL 的 CTE 是**按 query block 作用域**的。
+- **利用**：在任意子查询里定义一个与目标真实表同名的 CTE（如 `SELECT * FROM secret WHERE id IN (WITH secret AS (SELECT 1 AS id) SELECT id FROM secret)`），或非递归 CTE 自身体内引用同名真实表（`WITH secret AS (SELECT * FROM secret) SELECT * FROM secret`），使外层/体内的真实表被误当 CTE 跳过 → `ExtractTables` 返回空 → 白名单一次都不检查 → 放行。
+- **影响**：所有走 `guard.Check`/`ExtractTables` 的工具（`mysql_query`/`mysql_execute`/`mysql_script`/`mysql_explain`）。仅对未限定库名（落默认库）、且白名单窄于整个默认库时可利用。
+- **修复**：`ExtractTables` 改为**单遍作用域感知**——每个带 WITH 的语句节点压一层作用域帧；非递归 CTE 名在自身体后（Leave）才入作用域、递归 CTE 名在体内（Enter）即入；未限定名仅当命中**当前作用域栈**才豁免，否则一律按真实表提取（fail-closed）。
+- **回归测试**：`guard_test.go` 的 `TestCTEScopeWhitelistBypass` 与 `TestExtractTables` 的多条 CTE 作用域用例锁死；递归 CTE、同名带库名不豁免、同 WITH 后续 CTE 引用前一 CTE 等既有行为保持不变。
+
+## 7. 版本
+
+→ **1.2.0**（`VERSION` + MCP `Implementation.Version`）。含 tree 新特性 + 上述 CTE 作用域安全修复。
