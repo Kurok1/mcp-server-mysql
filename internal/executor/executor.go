@@ -72,7 +72,11 @@ func (e *Executor) Query(ctx context.Context, q string) (*QueryResult, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanRows(rows, e.maxRows)
+}
 
+// scanRows 把结果集扫描进 QueryResult（NULL → "NULL"），超过 maxRows 截断。
+func scanRows(rows *sql.Rows, maxRows int) (*QueryResult, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
@@ -84,7 +88,7 @@ func (e *Executor) Query(ctx context.Context, q string) (*QueryResult, error) {
 		ptrs[i] = &raw[i]
 	}
 	for rows.Next() {
-		if len(res.Rows) >= e.maxRows {
+		if len(res.Rows) >= maxRows {
 			res.Truncated = true
 			break
 		}

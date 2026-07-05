@@ -136,3 +136,52 @@ mysql: {user: u, password: p}
 		})
 	}
 }
+
+func TestMaxScriptStatementsDefault(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+mysql: {user: u, password: p, database: d}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Security.MaxScriptStatements != 50 {
+		t.Errorf("default max_script_statements = %d, want 50", cfg.Security.MaxScriptStatements)
+	}
+}
+
+func TestMaxScriptStatementsRejectNegative(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+mysql: {user: u, password: p, database: d}
+security:
+  max_script_statements: -1
+`))
+	if err == nil {
+		t.Error("expected error for negative max_script_statements")
+	}
+}
+
+func TestAuditEnabledDefaultsFalse(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+mysql: {user: u, password: p, database: d}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Audit.Enabled {
+		t.Error("audit.enabled should default to false (no disk logging)")
+	}
+}
+
+func TestAuditEnabledSet(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+mysql: {user: u, password: p, database: d}
+audit:
+  enabled: true
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Audit.Enabled {
+		t.Error("audit.enabled: true should be parsed as true")
+	}
+}

@@ -55,6 +55,7 @@ func main() {
 	slog.Info("mcp-server-mysql 启动",
 		"database", cfg.MySQL.Database,
 		"allowed_statements", cfg.Security.AllowedStatements,
+		"audit_enabled", cfg.Audit.Enabled,
 		"audit_dir", cfg.Audit.LogDir)
 	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		slog.Error("server 退出", "err", err)

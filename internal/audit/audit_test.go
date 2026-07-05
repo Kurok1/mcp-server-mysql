@@ -19,6 +19,7 @@ func newTestLogger(t *testing.T, ringSize int) *Logger {
 	t.Helper()
 	dir := t.TempDir()
 	l, err := NewLogger(config.AuditConfig{
+		Enabled:            true, // 落盘相关测试需开启
 		LogDir:             dir,
 		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
 		RingBufferSize:     ringSize,
@@ -28,6 +29,54 @@ func newTestLogger(t *testing.T, ringSize int) *Logger {
 	}
 	t.Cleanup(func() { l.Close() })
 	return l
+}
+
+func TestDisabledSkipsFileButKeepsStats(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewLogger(config.AuditConfig{
+		Enabled:            false,
+		LogDir:             dir,
+		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
+		RingBufferSize:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	l.Log(rec("SELECT 1", 50*time.Millisecond, 1, false))
+
+	// 关闭时不落盘：目录下不应出现任何 jsonl 文件
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("audit disabled should write no files, got %d entries", len(entries))
+	}
+
+	// 但会话内统计（环形缓冲）照常工作
+	s := l.Stats(5)
+	if s.Total != 1 {
+		t.Errorf("Stats.Total = %d, want 1 (ring buffer works even when disabled)", s.Total)
+	}
+}
+
+func TestDisabledSkipsDirCreation(t *testing.T) {
+	// 关闭时不创建日志目录：指向一个不存在的子路径也不应报错
+	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
+	l, err := NewLogger(config.AuditConfig{
+		Enabled:            false,
+		LogDir:             dir,
+		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
+		RingBufferSize:     10,
+	})
+	if err != nil {
+		t.Fatalf("disabled logger must not error on missing dir: %v", err)
+	}
+	defer l.Close()
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("disabled logger should not create log dir %s", dir)
+	}
 }
 
 func rec(sql string, dur time.Duration, rows int64, denied bool) Record {

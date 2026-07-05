@@ -114,6 +114,13 @@ func (g *Guard) Check(sql string, tool Tool) Decision {
 		return deny("wrong_tool", "读语句请使用 mysql_query 工具")
 	}
 
+	return g.checkClassified(stmt, class)
+}
+
+// checkClassified 执行分级开关、危险构造、无过滤写与白名单校验（不含工具交叉校验）。
+// Check 与 CheckScript 共用；调用方需先完成 classify 与（如需要）wrong_tool 判定。
+func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
+	isRead := class == ClassSelect || class == ClassUtility
 	if isRead {
 		if !g.allowed[ClassSelect] {
 			return deny("statement_not_enabled", "select 未在 allowed_statements 中启用")
@@ -142,4 +149,21 @@ func (g *Guard) Check(sql string, tool Tool) Decision {
 		}
 	}
 	return Decision{Allowed: true, Class: class, Tables: tables}
+}
+
+// ClassifyOne 解析单条 SQL 并返回其语句分级，供 server 层做工具级别的语句类型判定
+// （如 mysql_explain 仅接受 SELECT）。多语句、空输入或解析失败均返回 error。
+func ClassifyOne(sql string) (StmtClass, error) {
+	stmts, err := parse(sql)
+	if err != nil {
+		return "", fmt.Errorf("SQL 解析失败: %w", err)
+	}
+	if len(stmts) != 1 {
+		return "", fmt.Errorf("期望单条语句，实际 %d 条", len(stmts))
+	}
+	class, ok := classify(stmts[0])
+	if !ok {
+		return "", fmt.Errorf("不支持的语句类型")
+	}
+	return class, nil
 }
