@@ -21,10 +21,11 @@ import (
 )
 
 type deps struct {
-	g   *guard.Guard
-	ex  *executor.Executor
-	log *audit.Logger
-	db  string
+	g              *guard.Guard
+	ex             *executor.Executor
+	log            *audit.Logger
+	db             string
+	maxScriptStmts int
 }
 
 type QueryIn struct {
@@ -48,7 +49,7 @@ type StatsIn struct {
 
 // Build 装配 MCP server；main 与 E2E 测试共用。
 func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit.Logger) *mcp.Server {
-	d := &deps{g: g, ex: ex, log: log, db: cfg.MySQL.Database}
+	d := &deps{g: g, ex: ex, log: log, db: cfg.MySQL.Database, maxScriptStmts: cfg.Security.MaxScriptStatements}
 	s := mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.0.0"}, nil)
 
 	truePtr := true
@@ -62,6 +63,11 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 		Description: "执行单条写语句（INSERT/UPDATE/DELETE/DDL 中配置已允许的类型），返回影响行数。默认配置全部拒绝。",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
 	}, d.handleExecute)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "mysql_script",
+		Description: "在单个读写事务内执行多条语句脚本（; 分隔）：逐条过安全闸，任一条失败全部回滚，全部成功才提交。禁止 DDL；写类型需在 allowed_statements 中开启。",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
+	}, d.handleScript)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_list_tables",
 		Description: "列出库表白名单内可见的全部表。",
