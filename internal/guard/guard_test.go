@@ -97,6 +97,12 @@ func TestExtractTables(t *testing.T) {
 		{"反引号与大小写归一", "SELECT * FROM `MyDB`.`T1`", []string{"mydb.t1"}},
 		{"版本化注释里的表逃不掉", "SELECT * FROM t1 /*!80000 JOIN db2.t2 ON 1 = 1 */", []string{"myapp.t1", "db2.t2"}},
 		{"SHOW 指定表", "SHOW COLUMNS FROM db2.t2", []string{"db2.t2"}},
+		// CTE 作用域绕过（安全回归）：内层子查询里定义同名 CTE 不能洗白外层真实表
+		{"CTE 作用域绕过-IN 子查询", "SELECT * FROM secret WHERE id IN (WITH secret AS (SELECT 1 AS id) SELECT id FROM secret)", []string{"myapp.secret"}},
+		{"CTE 作用域绕过-派生表", "SELECT * FROM secret WHERE 0 = (SELECT count(*) FROM (WITH secret AS (SELECT 1 AS a) SELECT * FROM secret) d)", []string{"myapp.secret"}},
+		{"非递归 CTE 自身体内引用同名真实表", "WITH secret AS (SELECT * FROM secret) SELECT * FROM secret", []string{"myapp.secret"}},
+		{"同一 WITH 后续 CTE 引用前一 CTE 不算表", "WITH a AS (SELECT id FROM t1), b AS (SELECT id FROM a) SELECT * FROM b", []string{"myapp.t1"}},
+		{"CTE 深层嵌套不能洗白外层真实表", "SELECT * FROM secret WHERE id IN (SELECT x.id FROM (WITH secret AS (SELECT 1 AS id) SELECT id FROM secret) x)", []string{"myapp.secret"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -114,6 +120,35 @@ func TestExtractTables(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCTEScopeWhitelistBypass 锁死 CTE 作用域绕过：默认库内非白名单表不得被同名 CTE 洗白。
+func TestCTEScopeWhitelistBypass(t *testing.T) {
+	// 白名单只放行 myapp.orders；默认库 myapp 里的 secret 未放行。
+	g := New(config.SecurityConfig{
+		AllowedStatements: []string{"select"},
+		TableWhitelist:    []string{"myapp.orders"},
+	}, "myapp")
+	exploits := []string{
+		"SELECT * FROM secret WHERE id IN (WITH secret AS (SELECT 1 AS id) SELECT id FROM secret)",
+		"SELECT * FROM secret WHERE 0 = (SELECT count(*) FROM (WITH secret AS (SELECT 1 AS a) SELECT * FROM secret) d)",
+		"WITH secret AS (SELECT * FROM secret) SELECT * FROM secret",
+	}
+	for _, sql := range exploits {
+		t.Run(sql, func(t *testing.T) {
+			dec := g.Check(sql, ToolQuery)
+			if dec.Allowed {
+				t.Errorf("CTE 作用域绕过：非白名单表 secret 被放行\n  sql=%s", sql)
+			}
+			if dec.Rule != "table_whitelist" {
+				t.Errorf("rule=%q, want table_whitelist", dec.Rule)
+			}
+		})
+	}
+	// 合法查询不受影响：白名单内的表照常放行
+	if dec := g.Check("SELECT * FROM orders WHERE id = 1", ToolQuery); !dec.Allowed {
+		t.Errorf("合法查询被误拦: rule=%s", dec.Rule)
 	}
 }
 
