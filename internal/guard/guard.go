@@ -150,3 +150,20 @@ func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
 	}
 	return Decision{Allowed: true, Class: class, Tables: tables}
 }
+
+// ClassifyOne 解析单条 SQL 并返回其语句分级，供 server 层做工具级别的语句类型判定
+// （如 mysql_explain 仅接受 SELECT）。多语句、空输入或解析失败均返回 error。
+func ClassifyOne(sql string) (StmtClass, error) {
+	stmts, err := parse(sql)
+	if err != nil {
+		return "", fmt.Errorf("SQL 解析失败: %w", err)
+	}
+	if len(stmts) != 1 {
+		return "", fmt.Errorf("期望单条语句，实际 %d 条", len(stmts))
+	}
+	class, ok := classify(stmts[0])
+	if !ok {
+		return "", fmt.Errorf("不支持的语句类型")
+	}
+	return class, nil
+}
