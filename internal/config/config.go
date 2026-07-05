@@ -57,6 +57,9 @@ type SecurityConfig struct {
 }
 
 type AuditConfig struct {
+	// Enabled 为 false（默认）时不落盘 JSONL 审计日志，也不创建日志目录；
+	// 会话内统计（mysql_stats 的环形缓冲）不受影响，始终工作。
+	Enabled            bool     `yaml:"enabled"`
 	LogDir             string   `yaml:"log_dir"`
 	SlowQueryThreshold Duration `yaml:"slow_query_threshold"`
 	RingBufferSize     int      `yaml:"ring_buffer_size"`
