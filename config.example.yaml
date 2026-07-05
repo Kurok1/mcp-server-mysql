@@ -17,6 +17,7 @@ security:
   max_rows: 1000
   query_timeout: 30s
   block_unfiltered_writes: true
+  max_script_statements: 50      # 单个 mysql_script 脚本的语句条数上限
 
 audit:
   log_dir: ~/.mcp-server-mysql/logs   # Docker 运行时务必指向挂载卷，如 /data/logs

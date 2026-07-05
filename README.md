@@ -11,6 +11,8 @@
 - **执行护栏**：返回行数硬上限、查询超时、无 WHERE 的 UPDATE/DELETE 拦截、强制单语句
 - **执行监控**：每条 SQL 记录耗时与行数，慢查询自动标记，`mysql_stats` 工具可在对话里直接问"刚才哪条最慢"
 - **结构化审计**：JSONL 按天滚动，**被拒绝的请求同样落盘**（含命中的规则名）
+- **原子脚本执行**：`mysql_script` 把多语句脚本逐条过同一套 AST 安全闸，包在单个读写事务里执行——任一条失败整体回滚，DDL 因隐式提交会破坏原子性而一律拒绝；驱动层仍逐条单发，`multiStatements=false` 不变
+- **执行计划分析**：`mysql_explain` 对单条 SELECT 返回 EXPLAIN 计划，内层表照走白名单校验
 
 ## MCP 工具
 
@@ -21,6 +23,8 @@
 | `mysql_list_tables` | 列出白名单内可见的表 |
 | `mysql_describe_table` | 查看白名单内某表的列结构 |
 | `mysql_stats` | 本会话执行统计：总数/拒绝数、平均与 P95 耗时、慢查询 Top N |
+| `mysql_script` | 在单个读写事务内执行多语句脚本（; 分隔），任一条失败整体回滚；禁止 DDL |
+| `mysql_explain` | 对单条 SELECT 返回执行计划（traditional/json，支持 EXPLAIN ANALYZE） |
 
 ## 快速开始 A：二进制
 
