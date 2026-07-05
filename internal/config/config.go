@@ -52,6 +52,8 @@ type SecurityConfig struct {
 	QueryTimeout      Duration `yaml:"query_timeout"`
 	// nil 表示未配置，guard 侧按 true（拦截）处理——默认往严的方向落。
 	BlockUnfilteredWrites *bool `yaml:"block_unfiltered_writes"`
+	// 单个 mysql_script 脚本允许的语句条数上限。
+	MaxScriptStatements int `yaml:"max_script_statements"`
 }
 
 type AuditConfig struct {
@@ -116,6 +118,9 @@ func (c *Config) applyDefaults() {
 	if c.Security.QueryTimeout == 0 {
 		c.Security.QueryTimeout = Duration(30 * time.Second)
 	}
+	if c.Security.MaxScriptStatements == 0 {
+		c.Security.MaxScriptStatements = 50
+	}
 	if c.Audit.LogDir == "" {
 		home, _ := os.UserHomeDir()
 		c.Audit.LogDir = filepath.Join(home, ".mcp-server-mysql", "logs")
@@ -149,6 +154,9 @@ func (c *Config) validate() error {
 		if !whitelistPattern.MatchString(p) {
 			return fmt.Errorf("table_whitelist 模式 %q 非法（要求 db.table 形式，可用通配符 *）", p)
 		}
+	}
+	if c.Security.MaxScriptStatements < 0 {
+		return fmt.Errorf("max_script_statements 不能为负数")
 	}
 	return nil
 }
