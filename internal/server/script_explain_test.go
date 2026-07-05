@@ -171,3 +171,61 @@ func TestE2EExplain(t *testing.T) {
 		}
 	})
 }
+
+func TestE2EExplainTree(t *testing.T) {
+	sess := startWriteStack(t)
+
+	t.Run("tree 出计划树", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "SELECT * FROM t1 WHERE n = 'alice'", "format": "tree",
+		})
+		if isErr || !strings.Contains(text, "->") {
+			t.Errorf("isErr=%v text=%s", isErr, text)
+		}
+	})
+
+	t.Run("tree 非白名单表被拒（执行前）", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "SELECT * FROM mysql.user", "format": "tree",
+		})
+		if !isErr || !strings.Contains(text, "DENIED [table_whitelist]") {
+			t.Errorf("isErr=%v text=%s", isErr, text)
+		}
+	})
+
+	t.Run("tree JOIN 夹带非白名单被拒", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "SELECT * FROM t1 JOIN mysql.user u ON 1 = 1", "format": "tree",
+		})
+		if !isErr || !strings.Contains(text, "DENIED [table_whitelist]") {
+			t.Errorf("isErr=%v text=%s", isErr, text)
+		}
+	})
+
+	t.Run("tree INTO OUTFILE 被拒", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "SELECT * FROM t1 INTO OUTFILE '/tmp/x'", "format": "tree",
+		})
+		if !isErr || !strings.Contains(text, "DENIED [dangerous_construct]") {
+			t.Errorf("isErr=%v text=%s", isErr, text)
+		}
+	})
+
+	t.Run("tree 写语句被拒", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "UPDATE t1 SET n = 'x' WHERE id = 1", "format": "tree",
+		})
+		if !isErr || !strings.Contains(text, "DENIED [not_select]") {
+			t.Errorf("isErr=%v text=%s", isErr, text)
+		}
+	})
+
+	t.Run("tree 多语句被拒", func(t *testing.T) {
+		text, isErr := callText(t, sess, "mysql_explain", map[string]any{
+			"sql": "SELECT * FROM t1; SELECT 1", "format": "tree",
+		})
+		if !isErr {
+			t.Errorf("multi-statement should be denied, text=%s", text)
+		}
+	})
+}
