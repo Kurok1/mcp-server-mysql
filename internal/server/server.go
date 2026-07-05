@@ -83,6 +83,11 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 		Description: "查询本会话 SQL 执行统计：总数/拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleStats)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "mysql_explain",
+		Description: "对单条 SELECT 返回执行计划。format 可选 traditional(默认)/json；analyze=true 执行 EXPLAIN ANALYZE（真实运行查询，返回实际耗时/行数）。",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, d.handleExplain)
 	return s
 }
 
