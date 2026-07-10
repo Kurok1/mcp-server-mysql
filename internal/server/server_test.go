@@ -28,7 +28,7 @@ func TestFormatResult(t *testing.T) {
 	if !strings.Contains(got, "id | name") || !strings.Contains(got, "2 | NULL") {
 		t.Errorf("formatResult:\n%s", got)
 	}
-	if !strings.Contains(got, "(2 行)") {
+	if !strings.Contains(got, "(2 rows)") {
 		t.Errorf("missing row count:\n%s", got)
 	}
 }
@@ -40,7 +40,7 @@ func TestFormatResultTruncated(t *testing.T) {
 		Truncated: true,
 	}
 	got := formatResult(res)
-	if !strings.Contains(got, "截断") {
+	if !strings.Contains(got, "truncated") {
 		t.Errorf("missing truncation notice:\n%s", got)
 	}
 }

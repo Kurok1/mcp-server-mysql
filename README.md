@@ -191,7 +191,7 @@ Every denial comes back as machine-readable text — `DENIED [rule_name]: reason
 | `script_ddl` / `script_too_long` / `script_empty` | DDL inside a script / script over the statement cap / empty script |
 | `invalid_query` / `not_select` / `invalid_format` / `invalid_identifier` | Parameter validation of `mysql_explain` / `mysql_describe_table` |
 
-One format variant: `mysql_script` denials read `DENIED [rule] 第 N 条: reason`, where `第 N 条` ("statement N") locates the offending statement inside the script.
+`mysql_script` denials prefix the reason with the position of the offending statement: `DENIED [rule]: statement N: reason`.
 
 The guard is the test suite's center of gravity: ~100 table-driven cases cover stacked-statement injection, versioned-comment smuggling, CTE-shadowing whitelist bypasses, `INSERT ... SELECT` table extraction, and more; end-to-end tests — whitelist enforcement, the READ ONLY backstop rejecting writes, script rollback, EXPLAIN-tree denials — run against a real MySQL 8.0 in testcontainers.
 
@@ -258,7 +258,6 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 
 - **MySQL 8.x** — the E2E suite runs against MySQL 8.0 (8.0.45) via testcontainers. MySQL 5.7 and MariaDB are untested.
 - **Transport** — stdio; server identity `mcp-server-mysql`. Exposes 7 tools (no MCP resources or prompts).
-- **Language note** — tool descriptions and runtime messages (result labels, `DENIED` reasons) are currently in Chinese. The rule names and record fields are English and stable, and modern LLMs handle the mixed output without issue.
 
 ## Development
 

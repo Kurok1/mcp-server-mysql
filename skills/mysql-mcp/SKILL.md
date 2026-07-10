@@ -54,7 +54,7 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ### 写操作
 
-写之前先用 SELECT 确认影响面（会命中几行、是不是想改的那些行），执行后核对返回的"N 行受影响"是否符合预期。若与预期不符，立即告诉用户，不要继续。
+写之前先用 SELECT 确认影响面（会命中几行、是不是想改的那些行），执行后核对返回的 `N rows affected` 是否符合预期。若与预期不符，立即告诉用户，不要继续。
 
 ### 批量修数（mysql_script）
 
@@ -103,8 +103,8 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 ## 结果解读
 
 - 读结果超过行数上限会截断并标注——看到截断标记时，告诉用户结果不完整，改用聚合或分页。
-- 写结果返回"OK，N 行受影响"——核对 N 是否符合预期。
-- 脚本结果逐条编号，末尾是 `COMMIT（N 条全部成功）`或`第 k 条执行失败…已 ROLLBACK`——ROLLBACK 意味着**所有**写入都没有生效，包括失败之前的条目。
+- 写结果返回 `OK, N rows affected`——核对 N 是否符合预期。
+- 脚本结果逐条编号，末尾是 `COMMIT (all N statements succeeded)` 或 `statement k failed: …; ROLLBACK executed`——ROLLBACK 意味着**所有**写入都没有生效，包括失败之前的条目。
 - 服务端可能开启了审计日志：所有请求（含被拒的）可能被永久记录，SQL 原文都在其中。
 
 ## 服务端配置边界

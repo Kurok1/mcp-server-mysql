@@ -29,16 +29,16 @@ func (g *Guard) CheckScript(sql string, maxStatements int) ScriptCheck {
 	stmts, err := parse(sql)
 	if err != nil {
 		return ScriptCheck{Denied: true, DeniedIndex: 1,
-			Decision: deny("parse_error", "SQL 解析失败（fail-closed）: "+err.Error())}
+			Decision: deny("parse_error", "SQL parse failed (fail-closed): "+err.Error())}
 	}
 	if len(stmts) == 0 {
 		return ScriptCheck{Denied: true, DeniedIndex: 1,
-			Decision: deny("script_empty", "脚本为空")}
+			Decision: deny("script_empty", "script is empty")}
 	}
 	if len(stmts) > maxStatements {
 		return ScriptCheck{Denied: true, DeniedIndex: 1,
 			Decision: deny("script_too_long",
-				fmt.Sprintf("脚本含 %d 条语句，超过上限 %d", len(stmts), maxStatements))}
+				fmt.Sprintf("script has %d statements, exceeding the limit of %d", len(stmts), maxStatements))}
 	}
 
 	sc := ScriptCheck{}
@@ -47,11 +47,11 @@ func (g *Guard) CheckScript(sql string, maxStatements int) ScriptCheck {
 		class, ok := classify(stmt)
 		if !ok {
 			return ScriptCheck{Denied: true, DeniedIndex: idx,
-				Decision: deny("unsupported_statement", "语句类型不在支持范围内（SET/GRANT/CALL/事务控制等一律拒绝）")}
+				Decision: deny("unsupported_statement", "unsupported statement type (SET/GRANT/CALL/transaction control etc. are always denied)")}
 		}
 		if class == ClassDDL {
 			return ScriptCheck{Denied: true, DeniedIndex: idx,
-				Decision: deny("script_ddl", "脚本内不允许 DDL（隐式提交会破坏原子性）")}
+				Decision: deny("script_ddl", "DDL is not allowed inside scripts (implicit commit breaks atomicity)")}
 		}
 		dec := g.checkClassified(stmt, class)
 		if !dec.Allowed {

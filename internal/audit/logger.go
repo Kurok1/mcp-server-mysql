@@ -31,7 +31,7 @@ type Logger struct {
 func NewLogger(cfg config.AuditConfig) (*Logger, error) {
 	if cfg.Enabled {
 		if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
-			return nil, fmt.Errorf("创建审计日志目录: %w", err)
+			return nil, fmt.Errorf("create audit log directory: %w", err)
 		}
 	}
 	return &Logger{
@@ -67,7 +67,7 @@ func (l *Logger) Log(rec Record) {
 		f, err := os.OpenFile(filepath.Join(l.dir, "audit-"+date+".jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "audit: 打开日志文件失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "audit: failed to open log file: %v\n", err)
 			return
 		}
 		l.f = f
@@ -75,11 +75,11 @@ func (l *Logger) Log(rec Record) {
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit: 序列化失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "audit: failed to marshal record: %v\n", err)
 		return
 	}
 	if _, err := l.f.Write(append(line, '\n')); err != nil {
-		fmt.Fprintf(os.Stderr, "audit: 写入失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "audit: failed to write: %v\n", err)
 	}
 }
 

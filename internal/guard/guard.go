@@ -91,27 +91,27 @@ func (g *Guard) TableAllowed(db, table string) bool {
 func (g *Guard) Check(sql string, tool Tool) Decision {
 	stmts, err := parse(sql)
 	if err != nil {
-		return deny("parse_error", "SQL 解析失败（fail-closed）: "+err.Error())
+		return deny("parse_error", "SQL parse failed (fail-closed): "+err.Error())
 	}
 	if len(stmts) == 0 {
-		return deny("parse_error", "空语句")
+		return deny("parse_error", "empty statement")
 	}
 	if len(stmts) > 1 {
-		return deny("multi_statement", fmt.Sprintf("检测到 %d 条语句，只允许单语句执行", len(stmts)))
+		return deny("multi_statement", fmt.Sprintf("found %d statements; only a single statement is allowed", len(stmts)))
 	}
 	stmt := stmts[0]
 
 	class, ok := classify(stmt)
 	if !ok {
-		return deny("unsupported_statement", "语句类型不在支持范围内（SET/GRANT/CALL/事务控制等一律拒绝）")
+		return deny("unsupported_statement", "unsupported statement type (SET/GRANT/CALL/transaction control etc. are always denied)")
 	}
 
 	isRead := class == ClassSelect || class == ClassUtility
 	if tool == ToolQuery && !isRead {
-		return deny("wrong_tool", "写语句不能通过 mysql_query 执行，请使用 mysql_execute（且需配置允许）")
+		return deny("wrong_tool", "write statements cannot go through mysql_query; use mysql_execute (the type must also be enabled in config)")
 	}
 	if tool == ToolExecute && isRead {
-		return deny("wrong_tool", "读语句请使用 mysql_query 工具")
+		return deny("wrong_tool", "read statements should use mysql_query")
 	}
 
 	return g.checkClassified(stmt, class)
@@ -123,11 +123,11 @@ func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
 	isRead := class == ClassSelect || class == ClassUtility
 	if isRead {
 		if !g.allowed[ClassSelect] {
-			return deny("statement_not_enabled", "select 未在 allowed_statements 中启用")
+			return deny("statement_not_enabled", "select is not enabled in allowed_statements")
 		}
 	} else if !g.allowed[class] {
 		return deny("statement_not_enabled",
-			fmt.Sprintf("语句类型 %s 未在 allowed_statements 中启用", class))
+			fmt.Sprintf("statement type %s is not enabled in allowed_statements", class))
 	}
 
 	if reason := checkDangerous(stmt); reason != "" {
@@ -142,7 +142,7 @@ func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
 	tables := ExtractTables(stmt, g.defaultDB)
 	for _, t := range tables {
 		if !g.matcher.allowed(t) {
-			d := deny("table_whitelist", fmt.Sprintf("表 %s 不在白名单中", t))
+			d := deny("table_whitelist", fmt.Sprintf("table %s is not in the whitelist", t))
 			d.Class = class
 			d.Tables = tables
 			return d
@@ -156,14 +156,14 @@ func (g *Guard) checkClassified(stmt ast.StmtNode, class StmtClass) Decision {
 func ClassifyOne(sql string) (StmtClass, error) {
 	stmts, err := parse(sql)
 	if err != nil {
-		return "", fmt.Errorf("SQL 解析失败: %w", err)
+		return "", fmt.Errorf("SQL parse failed: %w", err)
 	}
 	if len(stmts) != 1 {
-		return "", fmt.Errorf("期望单条语句，实际 %d 条", len(stmts))
+		return "", fmt.Errorf("expected a single statement, got %d", len(stmts))
 	}
 	class, ok := classify(stmts[0])
 	if !ok {
-		return "", fmt.Errorf("不支持的语句类型")
+		return "", fmt.Errorf("unsupported statement type")
 	}
 	return class, nil
 }

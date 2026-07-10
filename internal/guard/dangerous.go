@@ -16,12 +16,12 @@ func (v *dangerVisitor) Enter(n ast.Node) (ast.Node, bool) {
 	switch e := n.(type) {
 	case *ast.SelectStmt:
 		if e.SelectIntoOpt != nil {
-			v.reason = "SELECT ... INTO OUTFILE/DUMPFILE 可写服务器文件系统"
+			v.reason = "SELECT ... INTO OUTFILE/DUMPFILE can write files on the server"
 			return n, true
 		}
 	case *ast.FuncCallExpr:
 		if e.FnName.L == "load_file" {
-			v.reason = "LOAD_FILE() 可读服务器文件系统"
+			v.reason = "LOAD_FILE() can read files on the server"
 			return n, true
 		}
 	}
@@ -42,11 +42,11 @@ func checkUnfiltered(stmt ast.StmtNode) string {
 	switch s := stmt.(type) {
 	case *ast.UpdateStmt:
 		if s.Where == nil {
-			return "UPDATE 缺少 WHERE 子句（全表更新被拦截）"
+			return "UPDATE without a WHERE clause (full-table update blocked)"
 		}
 	case *ast.DeleteStmt:
 		if s.Where == nil {
-			return "DELETE 缺少 WHERE 子句（全表删除被拦截）"
+			return "DELETE without a WHERE clause (full-table delete blocked)"
 		}
 	}
 	return ""

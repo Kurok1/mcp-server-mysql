@@ -35,7 +35,7 @@ func New(mc config.MySQLConfig, sec config.SecurityConfig) (*Executor, error) {
 
 	conn, err := mysql.NewConnector(c)
 	if err != nil {
-		return nil, fmt.Errorf("构建 MySQL connector: %w", err)
+		return nil, fmt.Errorf("build MySQL connector: %w", err)
 	}
 	db := sql.OpenDB(conn)
 	db.SetMaxOpenConns(mc.Pool.MaxOpen)
@@ -63,7 +63,7 @@ func (e *Executor) Query(ctx context.Context, q string) (*QueryResult, error) {
 
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("开启只读事务: %w", err)
+		return nil, fmt.Errorf("begin read-only transaction: %w", err)
 	}
 	defer tx.Rollback()
 

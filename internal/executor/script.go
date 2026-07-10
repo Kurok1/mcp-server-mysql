@@ -30,7 +30,7 @@ type StmtResult struct {
 func (e *Executor) RunScript(ctx context.Context, stmts []ScriptStmt) ([]StmtResult, int, error) {
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
-		return nil, 0, fmt.Errorf("开启事务: %w", err)
+		return nil, 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	results := make([]StmtResult, 0, len(stmts))
 	for i, s := range stmts {
@@ -67,7 +67,7 @@ func (e *Executor) RunScript(ctx context.Context, stmts []ScriptStmt) ([]StmtRes
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return results, 0, fmt.Errorf("提交事务: %w", err)
+		return results, 0, fmt.Errorf("commit transaction: %w", err)
 	}
 	return results, 0, nil
 }

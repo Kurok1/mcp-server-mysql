@@ -14,7 +14,7 @@ import (
 // formatResult 把结果集渲染成给 LLM 看的紧凑文本表格。
 func formatResult(res *executor.QueryResult) string {
 	if len(res.Columns) == 0 {
-		return "(无结果)"
+		return "(no results)"
 	}
 	var b strings.Builder
 	b.WriteString(strings.Join(res.Columns, " | "))
@@ -23,9 +23,9 @@ func formatResult(res *executor.QueryResult) string {
 		b.WriteString(strings.Join(row, " | "))
 		b.WriteByte('\n')
 	}
-	fmt.Fprintf(&b, "(%d 行)", len(res.Rows))
+	fmt.Fprintf(&b, "(%d rows)", len(res.Rows))
 	if res.Truncated {
-		fmt.Fprintf(&b, "（已在第 %d 行截断，如需更多请加 LIMIT 或筛选条件）", len(res.Rows))
+		fmt.Fprintf(&b, " (truncated at row %d; add LIMIT or filter conditions for more)", len(res.Rows))
 	}
 	return b.String()
 }

@@ -191,7 +191,7 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 | `script_ddl` / `script_too_long` / `script_empty` | 脚本含 DDL / 超语句条数上限 / 为空 |
 | `invalid_query` / `not_select` / `invalid_format` / `invalid_identifier` | `mysql_explain` / `mysql_describe_table` 的参数校验 |
 
-一个格式变体：`mysql_script` 的拒绝文本为 `DENIED [规则名] 第 N 条: 原因`，`第 N 条` 定位到脚本中被拒的那条语句。
+`mysql_script` 的拒绝文本会在原因前标注被拒语句的位置：`DENIED [规则名]: statement N: 原因`。
 
 守卫逻辑是测试投入的重心：约 100 个表驱动用例覆盖堆叠语句注入、版本化注释走私、CTE 遮蔽白名单绕过、`INSERT ... SELECT` 表提取等对抗场景；端到端测试——白名单强制、READ ONLY 兜底拒写、脚本回滚、EXPLAIN tree 拒绝路径——跑在 testcontainers 拉起的真实 MySQL 8.0 上。
 
@@ -258,6 +258,7 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 
 - **MySQL 8.x** —— E2E 测试基于 testcontainers 在 MySQL 8.0（8.0.45）上运行。MySQL 5.7 与 MariaDB 未经测试。
 - **传输** —— stdio；server 标识为 `mcp-server-mysql`。暴露 7 个工具（无 MCP resources / prompts）。
+- **运行时消息** —— 工具描述与运行时输出（结果标注、`DENIED` 原因）为英文，便于各类客户端与国际用户使用；规则名与审计字段本就是英文，保持稳定。
 
 ## 开发
 

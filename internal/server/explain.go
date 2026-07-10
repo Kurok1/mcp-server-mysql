@@ -15,9 +15,9 @@ import (
 )
 
 type ExplainIn struct {
-	SQL     string `json:"sql" jsonschema:"要分析执行计划的单条 SELECT 查询"`
-	Format  string `json:"format,omitempty" jsonschema:"输出格式：traditional(默认) / json / tree"`
-	Analyze bool   `json:"analyze,omitempty" jsonschema:"true 则执行 EXPLAIN ANALYZE（真实运行查询，仅限 SELECT）"`
+	SQL     string `json:"sql" jsonschema:"The single SELECT query to explain"`
+	Format  string `json:"format,omitempty" jsonschema:"Output format: traditional (default) / json / tree"`
+	Analyze bool   `json:"analyze,omitempty" jsonschema:"If true, run EXPLAIN ANALYZE (actually executes the query; SELECT only)"`
 }
 
 func (d *deps) handleExplain(ctx context.Context, req *mcp.CallToolRequest, in ExplainIn) (*mcp.CallToolResult, any, error) {
@@ -26,7 +26,7 @@ func (d *deps) handleExplain(ctx context.Context, req *mcp.CallToolRequest, in E
 		return errResult("DENIED [invalid_query]: " + err.Error()), nil, nil
 	}
 	if class != guard.ClassSelect {
-		return errResult("DENIED [not_select]: mysql_explain 只接受单条 SELECT 查询；写语句计划请用 mysql_query 的 EXPLAIN"), nil, nil
+		return errResult("DENIED [not_select]: mysql_explain accepts a single SELECT only; use EXPLAIN via mysql_query for write-statement plans"), nil, nil
 	}
 
 	var prefix string
@@ -42,7 +42,7 @@ func (d *deps) handleExplain(ctx context.Context, req *mcp.CallToolRequest, in E
 	case in.Format == "" || in.Format == "traditional":
 		prefix = "EXPLAIN "
 	default:
-		return errResult("DENIED [invalid_format]: format 仅支持 traditional/json/tree"), nil, nil
+		return errResult("DENIED [invalid_format]: format must be one of traditional/json/tree"), nil, nil
 	}
 
 	// 拼好的 EXPLAIN 文本原样走现有 guard→executor→audit 管道（ToolQuery）。
@@ -74,7 +74,7 @@ func (d *deps) runExplainTree(ctx context.Context, innerSQL string) *mcp.CallToo
 	if err != nil {
 		rec.Error = err.Error()
 		d.log.Log(rec)
-		return errResult("执行失败: " + err.Error())
+		return errResult("execution failed: " + err.Error())
 	}
 	rec.Rows = int64(len(res.Rows))
 	d.log.Log(rec)

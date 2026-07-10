@@ -29,22 +29,22 @@ type deps struct {
 }
 
 type QueryIn struct {
-	SQL string `json:"sql" jsonschema:"要执行的单条只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN）"`
+	SQL string `json:"sql" jsonschema:"The single read-only SQL statement to run (SELECT/SHOW/DESCRIBE/EXPLAIN)"`
 }
 
 type ExecuteIn struct {
-	SQL string `json:"sql" jsonschema:"要执行的单条写语句（INSERT/UPDATE/DELETE/DDL，需配置允许）"`
+	SQL string `json:"sql" jsonschema:"The single write statement to run (INSERT/UPDATE/DELETE/DDL; the type must be enabled in config)"`
 }
 
 type ListTablesIn struct{}
 
 type DescribeIn struct {
-	Database string `json:"database,omitempty" jsonschema:"库名，缺省使用配置的默认库"`
-	Table    string `json:"table" jsonschema:"表名"`
+	Database string `json:"database,omitempty" jsonschema:"Database name; defaults to the configured database"`
+	Table    string `json:"table" jsonschema:"Table name"`
 }
 
 type StatsIn struct {
-	TopN int `json:"top_n,omitempty" jsonschema:"慢查询 Top N，默认 5"`
+	TopN int `json:"top_n,omitempty" jsonschema:"Top N slow queries, default 5"`
 }
 
 // Build 装配 MCP server；main 与 E2E 测试共用。
@@ -55,37 +55,37 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 	truePtr := true
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_query",
-		Description: "执行单条只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN）。受库表白名单、行数上限与超时约束。",
+		Description: "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN). Subject to the table whitelist, row cap and query timeout.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleQuery)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_execute",
-		Description: "执行单条写语句（INSERT/UPDATE/DELETE/DDL 中配置已允许的类型），返回影响行数。默认配置全部拒绝。",
+		Description: "Run a single write statement (INSERT/UPDATE/DELETE/DDL types enabled in config); returns affected rows. The default config denies all writes.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
 	}, d.handleExecute)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_script",
-		Description: "在单个读写事务内执行多条语句脚本（; 分隔）：逐条过安全闸，任一条失败全部回滚，全部成功才提交。禁止 DDL；写类型需在 allowed_statements 中开启。",
+		Description: "Run a multi-statement script (;-separated) in a single read-write transaction: every statement is guard-checked, any failure rolls back everything, commit only if all succeed. DDL is banned; write types must be enabled in allowed_statements.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
 	}, d.handleScript)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_list_tables",
-		Description: "列出库表白名单内可见的全部表。",
+		Description: "List all tables visible through the table whitelist.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleListTables)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_describe_table",
-		Description: "查看白名单内某张表的列结构。",
+		Description: "Show the column structure of a whitelisted table.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleDescribe)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_stats",
-		Description: "查询本会话 SQL 执行统计：总数/拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数。",
+		Description: "Session SQL execution stats: totals/denials, average and P95 latency, top-N slow queries, per-table access counts.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleStats)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_explain",
-		Description: "对单条 SELECT 返回执行计划。format 可选 traditional(默认)/json；analyze=true 执行 EXPLAIN ANALYZE（真实运行查询，返回实际耗时/行数）。",
+		Description: "Return the execution plan for a single SELECT. format: traditional (default) / json / tree; analyze=true runs EXPLAIN ANALYZE (actually executes the query and returns real timing/rows).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleExplain)
 	return s
@@ -129,14 +129,14 @@ func (d *deps) run(ctx context.Context, tool, sqlText string, gt guard.Tool) *mc
 		execErr = err
 		if err == nil {
 			rec.Rows = n
-			text = fmt.Sprintf("OK，%d 行受影响", n)
+			text = fmt.Sprintf("OK, %d rows affected", n)
 		}
 	}
 	rec.DurationMS = time.Since(start).Milliseconds()
 	if execErr != nil {
 		rec.Error = execErr.Error()
 		d.log.Log(rec)
-		return errResult("执行失败: " + execErr.Error())
+		return errResult("execution failed: " + execErr.Error())
 	}
 	d.log.Log(rec)
 	return textResult(text)
@@ -165,7 +165,7 @@ func (d *deps) handleListTables(ctx context.Context, req *mcp.CallToolRequest, i
 	if err != nil {
 		rec.Error = err.Error()
 		d.log.Log(rec)
-		return errResult("执行失败: " + err.Error()), nil, nil
+		return errResult("execution failed: " + err.Error()), nil, nil
 	}
 	var lines []string
 	for _, row := range res.Rows {
@@ -176,7 +176,7 @@ func (d *deps) handleListTables(ctx context.Context, req *mcp.CallToolRequest, i
 	rec.Rows = int64(len(lines))
 	d.log.Log(rec)
 	if len(lines) == 0 {
-		return textResult("白名单内没有可见的表"), nil, nil
+		return textResult("no tables are visible through the whitelist"), nil, nil
 	}
 	return textResult(strings.Join(lines, "\n")), nil, nil
 }
@@ -189,10 +189,10 @@ func (d *deps) handleDescribe(ctx context.Context, req *mcp.CallToolRequest, in 
 		db = d.db
 	}
 	if !identRe.MatchString(db) || !identRe.MatchString(in.Table) {
-		return errResult("DENIED [invalid_identifier]: 库/表名只允许字母、数字、下划线和 $"), nil, nil
+		return errResult("DENIED [invalid_identifier]: database/table names may only contain letters, digits, underscore and $"), nil, nil
 	}
 	if !d.g.TableAllowed(db, in.Table) {
-		return errResult(fmt.Sprintf("DENIED [table_whitelist]: 表 %s.%s 不在白名单中", db, in.Table)), nil, nil
+		return errResult(fmt.Sprintf("DENIED [table_whitelist]: table %s.%s is not in the whitelist", db, in.Table)), nil, nil
 	}
 	// 标识符校验 + 白名单通过后再走 run：SHOW FULL COLUMNS 会再过一遍 guard，双保险且审计自动落
 	q := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`.`%s`", db, in.Table)
@@ -206,7 +206,7 @@ func (d *deps) handleStats(ctx context.Context, req *mcp.CallToolRequest, in Sta
 	}
 	b, err := json.MarshalIndent(d.log.Stats(topN), "", "  ")
 	if err != nil {
-		return errResult("统计序列化失败: " + err.Error()), nil, nil
+		return errResult("failed to serialize stats: " + err.Error()), nil, nil
 	}
 	return textResult(string(b)), nil, nil
 }

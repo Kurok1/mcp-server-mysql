@@ -25,7 +25,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 	dur, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("非法时长 %q: %w", s, err)
+		return fmt.Errorf("invalid duration %q: %w", s, err)
 	}
 	*d = Duration(dur)
 	return nil
@@ -81,7 +81,7 @@ var whitelistPattern = regexp.MustCompile(`^[\w$*]+\.[\w$*]+$`)
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件: %w", err)
+		return nil, fmt.Errorf("read config file: %w", err)
 	}
 	// ${ENV_VAR} 引用展开
 	expanded := os.Expand(string(raw), os.Getenv)
@@ -90,7 +90,7 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(strings.NewReader(expanded))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("解析配置文件: %w", err)
+		return nil, fmt.Errorf("parse config file: %w", err)
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
@@ -143,23 +143,23 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	if c.MySQL.User == "" {
-		return fmt.Errorf("mysql.user 不能为空")
+		return fmt.Errorf("mysql.user must not be empty")
 	}
 	if c.MySQL.Database == "" {
-		return fmt.Errorf("mysql.database 不能为空（用于补全未带库名的表）")
+		return fmt.Errorf("mysql.database must not be empty (used to qualify unqualified table names)")
 	}
 	for _, s := range c.Security.AllowedStatements {
 		if !validStatements[s] {
-			return fmt.Errorf("allowed_statements 含未知语句类型 %q（可选: select/insert/update/delete/ddl）", s)
+			return fmt.Errorf("allowed_statements contains unknown statement type %q (valid: select/insert/update/delete/ddl)", s)
 		}
 	}
 	for _, p := range c.Security.TableWhitelist {
 		if !whitelistPattern.MatchString(p) {
-			return fmt.Errorf("table_whitelist 模式 %q 非法（要求 db.table 形式，可用通配符 *）", p)
+			return fmt.Errorf("invalid table_whitelist pattern %q (expected db.table form, * wildcard allowed)", p)
 		}
 	}
 	if c.Security.MaxScriptStatements < 0 {
-		return fmt.Errorf("max_script_statements 不能为负数")
+		return fmt.Errorf("max_script_statements must not be negative")
 	}
 	return nil
 }
