@@ -82,3 +82,37 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # 镜像推送完成后，把 server.json 发布到官方 MCP registry（registry.modelcontextprotocol.io）。
+  # registry 会拉取镜像校验 io.modelcontextprotocol.server.name label，因此必须 needs: docker
+  mcp-registry:
+    runs-on: ubuntu-latest
+    needs: [docker]
+    permissions:
+      id-token: write   # GitHub OIDC 登录 MCP registry，无需额外密钥
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # 注意：OCI 包禁止 version 字段（registry 校验器会报错），版本只体现在 identifier 的 tag 里
+      - name: Stamp version into server.json
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" \
+             '.version = $v
+              | .packages[0].identifier = "ghcr.io/kurok1/mcp-server-mysql:" + $v' \
+             server.json > server.tmp && mv server.tmp server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish

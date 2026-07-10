@@ -15,5 +15,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/mcp-server-mysql ./cmd/mcp-server-mysql
 
 FROM gcr.io/distroless/static-debian12:nonroot
+# MCP registry 通过该 label 验证镜像归属，值必须与 server.json 的 name 完全一致（大小写敏感，
+# 命名空间用 GitHub 登录名的原始大小写；镜像仓库路径的小写 kurok1 不受影响，校验器不比对它）
+LABEL io.modelcontextprotocol.server.name="io.github.Kurok1/mcp-server-mysql"
 COPY --from=build /out/mcp-server-mysql /mcp-server-mysql
 ENTRYPOINT ["/mcp-server-mysql"]
