@@ -26,6 +26,14 @@
 | `mysql_script` | 在单个读写事务内执行多语句脚本（; 分隔），任一条失败整体回滚；禁止 DDL |
 | `mysql_explain` | 对单条 SELECT 返回执行计划（traditional/json/tree，支持 EXPLAIN ANALYZE） |
 
+## 配套 Claude Code Skill
+
+[skills/mysql-mcp](skills/mysql-mcp/SKILL.md) 是本 MCP 的使用指南 skill：教 Claude 选对工具、遵守安全边界（单语句、白名单、无 WHERE 拦截等）、读懂 `DENIED [规则名]` 拒绝信息并正确应对，而不是盲目重试。安装：
+
+```bash
+cp -r skills/mysql-mcp ~/.claude/skills/
+```
+
 ## 快速开始 A：二进制
 
 ```bash
