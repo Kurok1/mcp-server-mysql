@@ -50,7 +50,7 @@ type StatsIn struct {
 // Build 装配 MCP server；main 与 E2E 测试共用。
 func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit.Logger) *mcp.Server {
 	d := &deps{g: g, ex: ex, log: log, db: cfg.MySQL.Database, maxScriptStmts: cfg.Security.MaxScriptStatements}
-	s := mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.2.0"}, nil)
+	s := mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.2.1"}, nil)
 
 	truePtr := true
 	mcp.AddTool(s, &mcp.Tool{
