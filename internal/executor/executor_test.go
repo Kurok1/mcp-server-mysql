@@ -154,3 +154,9 @@ func TestIntegrationExecutor(t *testing.T) {
 		}
 	})
 }
+
+func TestQuoteIdentifier(t *testing.T) {
+	if got, want := quoteIdentifier("odd`name"), "`odd``name`"; got != want {
+		t.Fatalf("quoteIdentifier = %q, want %q", got, want)
+	}
+}

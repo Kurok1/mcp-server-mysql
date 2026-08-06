@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Kurok1/mcp-server-mysql",
   "title": "MySQL (security-first)",
-  "description": "Security-first MySQL MCP server: AST-validated SQL (fail-closed), default-deny whitelist, audit.",
+  "description": "Security-first MySQL MCP server: AST-validated SQL, default-deny whitelist, table-schema resources, audit.",
   "repository": {
     "url": "https://github.com/Kurok1/mcp-server-mysql",
     "source": "github"
