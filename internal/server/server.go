@@ -60,7 +60,7 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 	}
 	resources := &tableResourceRegistry{}
 	var s *mcp.Server
-	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.3.0"}, &mcp.ServerOptions{
+	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.3.1"}, &mcp.ServerOptions{
 		Capabilities: &mcp.ServerCapabilities{
 			Logging:   &mcp.LoggingCapabilities{},
 			Resources: &mcp.ResourceCapabilities{ListChanged: true},
