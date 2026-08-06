@@ -22,6 +22,7 @@ This project puts the security boundary on **real SQL semantic parsing** instead
 
 - **Statement-class gating** — `SELECT` / `INSERT` / `UPDATE` / `DELETE` / DDL are individually switchable; the default is read-only. `SET`, `GRANT`, `CALL`, `USE`, `LOAD DATA`, `LOCK TABLES`, and transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`) are rejected unconditionally — classification itself is an allowlist, so unknown statement types land on the deny side by construction.
 - **Default-deny table whitelist** — nothing is visible until whitelisted; patterns like `db.*`, `db.table`, `app_*.logs` (glob per side, case-insensitive). Every table reference is extracted from the AST: JOINs, subqueries, derived tables, CTEs (scope-aware — a CTE name can't shadow a real table to smuggle it past the check), multi-table DML, `INSERT ... SELECT`, and versioned comments.
+- **MCP table-schema resources** — after the MCP connection initializes, every privilege-visible, whitelisted base table is exposed as `mysql:///schema/{database}/{table}`. Reading a resource returns live `SHOW CREATE TABLE` SQL with only the volatile table-level `AUTO_INCREMENT=N` counter removed.
 - **Execution guardrails** — hard row cap, per-query timeout, single-statement enforcement, and a tripwire for `UPDATE`/`DELETE` without `WHERE`.
 - **Built-in observability** — per-query latency and row counts, slow-query flagging, and a `mysql_stats` tool so you can ask "which query was slowest?" right in the conversation.
 - **Structured audit, opt-in** — JSONL with daily rotation; denied SQL is recorded with the exact rule that fired. Off by default: no log files unless you enable it.
@@ -37,9 +38,21 @@ This project puts the security boundary on **real SQL semantic parsing** instead
 | `mysql_execute` | Run one write statement (`INSERT` / `UPDATE` / `DELETE` / DDL — each type must be enabled in config); returns affected rows |
 | `mysql_script` | Run a `;`-separated multi-statement script atomically in one transaction — all-or-nothing; DDL banned |
 | `mysql_explain` | Execution plan for a single `SELECT` (`format`: `traditional` / `json` / `tree`; `analyze: true` runs `EXPLAIN ANALYZE`) |
-| `mysql_list_tables` | List the tables visible through the whitelist |
+| `mysql_list_tables` | List the base tables visible through the whitelist |
 | `mysql_describe_table` | Column structure of a whitelisted table |
 | `mysql_stats` | Session stats: totals / denials, average & P95 latency, top-N slow queries, per-table access counts |
+
+## Resources
+
+The server takes one table snapshot when the MCP connection is initialized and registers one direct resource per visible base table:
+
+| URI | MIME type | Content |
+|---|---|---|
+| `mysql:///schema/{database}/{table}` | `application/sql` | Current normalized `SHOW CREATE TABLE` output |
+
+"Visible" is the intersection of what the configured MySQL account can see and `security.table_whitelist`. Views are not registered. Resource discovery is not capped by `security.max_rows`, and resource reads remain available even when `select` is absent from `allowed_statements`, because both operations execute fixed server-owned metadata SQL rather than user-submitted SQL.
+
+The resource **set** is a connection-time snapshot: a table created later appears after reconnecting, while a dropped or newly inaccessible table returns MCP Resource Not Found. The resource **content** is live, so `ALTER TABLE` is reflected on the next read. Resource discovery and reads do not enter the audit log or `mysql_stats`; initialization failures are written to stderr and leave an empty resource list without disabling the tools.
 
 ## Quick start
 
@@ -137,6 +150,9 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
                                ▼
 ┌───────────────────────  mcp-server-mysql  ───────────────────────┐
 │                                                                  │
+│  Table resources: mysql:///schema/{database}/{table}             │
+│  fixed metadata SQL · base tables only · whitelist-filtered      │
+│                                                                  │
 │  mysql_query · mysql_execute · mysql_script · mysql_explain      │
 │  mysql_list_tables · mysql_describe_table · mysql_stats          │
 │                             │                                    │
@@ -172,7 +188,7 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 
 **Layer 1 — the AST main gate.** Every statement is parsed by the TiDB parser (parse failure ⇒ denied), then must pass, in order: single-statement enforcement → statement-class allowlist (with a read/write tool cross-check: a write sent through `mysql_query` is denied even if writes are enabled) → per-class enable switches → dangerous-construct scan (`SELECT ... INTO OUTFILE`/`DUMPFILE`, `LOAD_FILE()` at any nesting depth) → missing-`WHERE` tripwire → full table-reference extraction checked against the default-deny whitelist.
 
-**Layer 2 — read-only transaction fallback.** Reads executed through the single-statement read path (`mysql_query`, `mysql_explain`, `mysql_list_tables`, `mysql_describe_table`) run inside `START TRANSACTION READ ONLY` — if the parser ever misclassified a write as a read, MySQL itself rejects it. (Write statements you explicitly enabled, and everything inside `mysql_script` — reads included — run outside this backstop; there, Layer 1 and Layer 0 are the controls.)
+**Layer 2 — read-only transaction fallback.** Reads executed through the single-statement read path (`mysql_query`, `mysql_explain`, `mysql_list_tables`, `mysql_describe_table`) and the fixed resource metadata path run inside `START TRANSACTION READ ONLY` — if the parser ever misclassified a write as a read, MySQL itself rejects it. (Write statements you explicitly enabled, and everything inside `mysql_script` — reads included — run outside this backstop; there, Layer 1 and Layer 0 are the controls.)
 
 **Layer 3 — driver-level lockout.** The connection sets `multiStatements=false`, so `COMMIT; DROP TABLE ...`-style stacked injection is impossible at the protocol level even if every layer above failed.
 
@@ -201,8 +217,8 @@ Security documentation you can't verify is marketing. The precise boundaries:
 
 - The read-only transaction backstop covers the **single-statement read path**. Write types you explicitly enable — and every statement inside `mysql_script`, reads included, since they share the script's read-write transaction — execute without it; there, the AST gate plus your database account privileges (Layer 0) are the controls.
 - `unfiltered_write` is a **missing-`WHERE` tripwire**, not full-table-write prevention: `UPDATE t SET a=1 WHERE 1=1` passes it. It catches mistakes, not malice.
-- Two utility paths execute fixed, non-user SQL by design: `mysql_list_tables` queries `information_schema` directly (results filtered row-by-row through the whitelist), and `EXPLAIN FORMAT=TREE` executes a hardcoded constant prefix + the inner `SELECT` — the inner statement passes the **full** guard pipeline first (the TiDB parser cannot parse `FORMAT=TREE` as a whole statement).
-- Audit records cover SQL that reaches the guard pipeline, allowed **and** denied. Not audited: `mysql_stats` calls, `mysql_describe_table` pre-check denials (`invalid_identifier` and its `table_whitelist` name check), and `mysql_explain` parameter denials (`invalid_query`, `not_select`, `invalid_format`). Script auditing follows actual execution: a guard-denied script yields one record for the whole script, and statements after a failed one — validated but never executed — are not recorded.
+- Fixed, non-user metadata SQL is used by `mysql_list_tables` and MCP resource discovery/read. Table discovery queries `information_schema` for base tables and filters every result through the whitelist; resource reads re-check the whitelist before `SHOW CREATE TABLE`. `EXPLAIN FORMAT=TREE` is another fixed-prefix path: the inner `SELECT` still passes the **full** guard pipeline first (the TiDB parser cannot parse `FORMAT=TREE` as a whole statement).
+- Audit records cover SQL that reaches the guard pipeline, allowed **and** denied. Not audited: MCP resource discovery/reads, `mysql_stats` calls, `mysql_describe_table` pre-check denials (`invalid_identifier` and its `table_whitelist` name check), and `mysql_explain` parameter denials (`invalid_query`, `not_select`, `invalid_format`). Script auditing follows actual execution: a guard-denied script yields one record for the whole script, and statements after a failed one — validated but never executed — are not recorded.
 - The MySQL connection is **plain TCP** — no TLS option and no Unix socket yet. Keep the server and the database on a trusted network, or tunnel the connection.
 
 ## Configuration
@@ -257,7 +273,7 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 ## Compatibility
 
 - **MySQL 8.x** — the E2E suite runs against MySQL 8.0 (8.0.45) via testcontainers. MySQL 5.7 and MariaDB are untested.
-- **Transport** — stdio; server identity `mcp-server-mysql`. Exposes 7 tools (no MCP resources or prompts).
+- **Transport** — stdio; server identity `mcp-server-mysql`. Exposes 7 tools and direct MySQL table-schema resources (no prompts).
 
 ## Development
 

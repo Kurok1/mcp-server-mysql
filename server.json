@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Kurok1/mcp-server-mysql",
   "title": "MySQL (security-first)",
-  "description": "Security-first MySQL MCP server: AST-validated SQL (fail-closed), default-deny whitelist, audit.",
+  "description": "Security-first MySQL MCP server: AST-validated SQL, default-deny whitelist, table-schema resources, audit.",
   "repository": {
     "url": "https://github.com/Kurok1/mcp-server-mysql",
     "source": "github"
   },
   "websiteUrl": "https://github.com/Kurok1/mcp-server-mysql",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/kurok1/mcp-server-mysql:1.2.1",
+      "identifier": "ghcr.io/kurok1/mcp-server-mysql:1.3.0",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"

@@ -22,6 +22,7 @@
 
 - **语句类型分级管控** —— `SELECT` / `INSERT` / `UPDATE` / `DELETE` / DDL 独立开关，默认只读；`SET`、`GRANT`、`CALL`、`USE`、`LOAD DATA`、`LOCK TABLES` 与事务控制（`BEGIN`/`COMMIT`/`ROLLBACK`）一律拒绝——分类本身就是白名单，未知语句类型天然落在拒绝侧。
 - **库表白名单，默认全拒** —— 不进白名单就不可见；支持 `db.*`、`db.table`、`app_*.logs`（两侧各自 glob 匹配，大小写不敏感）。所有表引用都从 AST 提取：JOIN、子查询、派生表、CTE（作用域感知——CTE 名字遮蔽真实表名的走私手法行不通）、多表 DML、`INSERT ... SELECT`、版本化注释，一个都逃不掉。
+- **MCP 表结构 Resources** —— MCP 连接初始化后，每张 MySQL 账号可见且命中白名单的基础表都会暴露为 `mysql:///schema/{database}/{table}`；读取时实时返回 `SHOW CREATE TABLE`，仅移除易变的表级 `AUTO_INCREMENT=N` 计数器。
 - **执行护栏** —— 返回行数硬上限、查询超时、强制单语句、无 `WHERE` 的 `UPDATE`/`DELETE` 拦截。
 - **执行监控** —— 每条 SQL 记录耗时与行数，慢查询自动标记；`mysql_stats` 工具让你在对话里直接问"刚才哪条最慢"。
 - **结构化审计（可选落盘）** —— JSONL 按天滚动，被拒绝的 SQL 连同命中的规则名一起记录。默认关闭：不开就不写任何日志文件。
@@ -37,9 +38,21 @@
 | `mysql_execute` | 执行单条写语句（`INSERT` / `UPDATE` / `DELETE` / DDL，需在配置中逐类开启），返回影响行数 |
 | `mysql_script` | 在单个事务内原子执行 `;` 分隔的多语句脚本——全成或全回滚；禁止 DDL |
 | `mysql_explain` | 单条 `SELECT` 的执行计划（`format`：`traditional` / `json` / `tree`；`analyze: true` 执行 `EXPLAIN ANALYZE`） |
-| `mysql_list_tables` | 列出白名单内可见的表 |
+| `mysql_list_tables` | 列出白名单内可见的基础表 |
 | `mysql_describe_table` | 查看白名单内某表的列结构 |
 | `mysql_stats` | 本会话统计：总数/拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数 |
+
+## MCP Resources
+
+服务端在 MCP 连接初始化时获取一次表快照，并为每张可见的基础表注册一个 direct Resource：
+
+| URI | MIME 类型 | 内容 |
+|---|---|---|
+| `mysql:///schema/{database}/{table}` | `application/sql` | 当前的、经过归一化的 `SHOW CREATE TABLE` 输出 |
+
+这里的“可见”是 MySQL 配置账号可见范围与 `security.table_whitelist` 的交集；View 不会注册为 Resource。Resource discovery 不受 `security.max_rows` 限制，即使 `allowed_statements` 没有开启 `select` 也可读取，因为 discovery/read 执行的是服务端固定元数据 SQL，而不是用户提交的 SQL。
+
+Resource **集合**是连接时快照：之后新建的表需重连才会出现；已删除或新近失权的表会在读取时返回 MCP Resource Not Found。Resource **内容**则实时读取，因此 `ALTER TABLE` 会在下次读取时体现。Resource discovery/read 不进入审计日志或 `mysql_stats`；初始化查库失败只写 stderr，Resource 列表为空，但 Tools 仍可使用。
 
 ## 快速开始
 
@@ -137,6 +150,9 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
                                ▼
 ┌───────────────────────  mcp-server-mysql  ───────────────────────┐
 │                                                                  │
+│  表结构 Resources：mysql:///schema/{database}/{table}            │
+│  固定元数据 SQL · 仅基础表 · 白名单过滤                          │
+│                                                                  │
 │  mysql_query · mysql_execute · mysql_script · mysql_explain      │
 │  mysql_list_tables · mysql_describe_table · mysql_stats          │
 │                             │                                    │
@@ -172,7 +188,7 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 
 **第一道 —— AST 主闸。** 每条语句先过 TiDB parser（解析失败即拒绝），随后依次通过：强制单语句 → 语句类型白名单式分级（附读写工具交叉校验：写语句走 `mysql_query`，即便写权限已开也照样拒）→ 逐类开关 → 危险构造扫描（任意嵌套深度的 `SELECT ... INTO OUTFILE`/`DUMPFILE`、`LOAD_FILE()`）→ 无 `WHERE` 拦截 → 全量表引用提取对照默认全拒的白名单。
 
-**第二道 —— 只读事务兜底。** 走单语句读路径（`mysql_query`、`mysql_explain`、`mysql_list_tables`、`mysql_describe_table`）的读语句强制包在 `START TRANSACTION READ ONLY` 中执行：解析器万一把写语句漏判成读，MySQL 会直接报错。（你显式开启的写语句类型，以及 `mysql_script` 内的全部语句——读也一样——都在此兜底之外运行，那里由第一道和第零道把关。）
+**第二道 —— 只读事务兜底。** 走单语句读路径（`mysql_query`、`mysql_explain`、`mysql_list_tables`、`mysql_describe_table`）的读语句，以及固定的 Resource 元数据路径，强制包在 `START TRANSACTION READ ONLY` 中执行：解析器万一把写语句漏判成读，MySQL 会直接报错。（你显式开启的写语句类型，以及 `mysql_script` 内的全部语句——读也一样——都在此兜底之外运行，那里由第一道和第零道把关。）
 
 **第三道 —— 驱动层。** 连接固定 `multiStatements=false`，`COMMIT; DROP TABLE ...` 式的堆叠注入即便上面每一层都失效，在协议层也不可能发生。
 
@@ -201,8 +217,8 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 
 - 只读事务兜底覆盖的是**单语句读路径**。你显式开启的写类型，以及 `mysql_script` 内的全部语句（读也一样，共享脚本的读写事务）都在兜底之外执行——对它们而言，AST 主闸加数据库账号权限（第零道）才是控制面。
 - `unfiltered_write` 是**漏写 `WHERE` 的绊线**，不是全表写入的完全防护：`UPDATE t SET a=1 WHERE 1=1` 能通过。它防的是失误，不是恶意。
-- 两条工具路径按设计执行固定的非用户 SQL：`mysql_list_tables` 直查 `information_schema`（结果逐行过白名单过滤）；`EXPLAIN FORMAT=TREE` 执行"硬编码常量前缀 + 内层 `SELECT`"——内层语句先过**完整**守卫管线（TiDB parser 无法把 `FORMAT=TREE` 整句解析）。
-- 审计覆盖进入守卫管线的 SQL，无论放行还是拒绝。不落审计的有：`mysql_stats` 调用本身、`mysql_describe_table` 的前置校验拒绝（`invalid_identifier` 及其表名白名单检查）、`mysql_explain` 的参数校验拒绝（`invalid_query`、`not_select`、`invalid_format`）。脚本的审计按实际执行记录：整段被守卫拒绝只记一条记录；某条执行失败后，其后已校验但未执行的语句不会入账。
+- `mysql_list_tables` 与 MCP Resource discovery/read 按设计执行固定的非用户元数据 SQL：表发现直查 `information_schema` 中的基础表并逐行过白名单，Resource 读取会再次检查白名单后执行 `SHOW CREATE TABLE`。`EXPLAIN FORMAT=TREE` 是另一条固定前缀路径——内层 `SELECT` 仍先过**完整**守卫管线（TiDB parser 无法把 `FORMAT=TREE` 整句解析）。
+- 审计覆盖进入守卫管线的 SQL，无论放行还是拒绝。不落审计的有：MCP Resource discovery/read、`mysql_stats` 调用本身、`mysql_describe_table` 的前置校验拒绝（`invalid_identifier` 及其表名白名单检查）、`mysql_explain` 的参数校验拒绝（`invalid_query`、`not_select`、`invalid_format`）。脚本的审计按实际执行记录：整段被守卫拒绝只记一条记录；某条执行失败后，其后已校验但未执行的语句不会入账。
 - MySQL 连接走**明文 TCP**——暂无 TLS 选项，也不支持 Unix socket。请让 server 与数据库处于可信网络，或自行建立隧道。
 
 ## 配置
@@ -257,7 +273,7 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 ## 兼容性
 
 - **MySQL 8.x** —— E2E 测试基于 testcontainers 在 MySQL 8.0（8.0.45）上运行。MySQL 5.7 与 MariaDB 未经测试。
-- **传输** —— stdio；server 标识为 `mcp-server-mysql`。暴露 7 个工具（无 MCP resources / prompts）。
+- **传输** —— stdio；server 标识为 `mcp-server-mysql`。暴露 7 个工具及 MySQL 表结构 direct Resources（无 prompts）。
 - **运行时消息** —— 工具描述与运行时输出（结果标注、`DENIED` 原因）为英文，便于各类客户端与国际用户使用；规则名与审计字段本就是英文，保持稳定。
 
 ## 开发

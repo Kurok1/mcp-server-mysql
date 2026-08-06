@@ -45,9 +45,16 @@ func TestFormatResultTruncated(t *testing.T) {
 	}
 }
 
-// startStack 起真实 MySQL 容器 + 完整 server，返回已连接的 MCP client session。
+// startStack 起真实 MySQL 容器 + 完整 server，返回测试装配与已连接的 MCP client session。
 // 容器启动代码与 executor 集成测试重复是有意为之：任务间不互相引用，可独立执行。
-func startStack(t *testing.T) *mcp.ClientSession {
+type testStack struct {
+	sess   *mcp.ClientSession
+	ex     *executor.Executor
+	cfg    *config.Config
+	logger *audit.Logger
+}
+
+func startStack(t *testing.T) *testStack {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("E2E needs Docker; run without -short")
@@ -96,8 +103,9 @@ func startStack(t *testing.T) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { ex.Close() })
 	for _, stmt := range []string{
-		"CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(20))",
-		"INSERT INTO t1 VALUES (1, 'alice'), (2, 'bob')",
+		"CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20) COMMENT 'column AUTO_INCREMENT=777') AUTO_INCREMENT=42 COMMENT='table AUTO_INCREMENT=999'",
+		"INSERT INTO t1 (name) VALUES ('alice'), ('bob')",
+		"CREATE VIEW v1 AS SELECT id, name FROM t1",
 	} {
 		if _, err := ex.Execute(ctx, stmt); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -119,7 +127,7 @@ func startStack(t *testing.T) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sess.Close() })
-	return sess
+	return &testStack{sess: sess, ex: ex, cfg: cfg, logger: logger}
 }
 
 func callText(t *testing.T, sess *mcp.ClientSession, tool string, args map[string]any) (string, bool) {
@@ -139,7 +147,8 @@ func callText(t *testing.T, sess *mcp.ClientSession, tool string, args map[strin
 }
 
 func TestE2E(t *testing.T) {
-	sess := startStack(t)
+	stack := startStack(t)
+	sess := stack.sess
 
 	t.Run("查询白名单内的表", func(t *testing.T) {
 		text, isErr := callText(t, sess, "mysql_query", map[string]any{"sql": "SELECT id, name FROM t1 ORDER BY id"})
@@ -164,7 +173,7 @@ func TestE2E(t *testing.T) {
 
 	t.Run("list_tables 只见白名单", func(t *testing.T) {
 		text, isErr := callText(t, sess, "mysql_list_tables", map[string]any{})
-		if isErr || !strings.Contains(text, "myapp.t1") || strings.Contains(text, "mysql.user") {
+		if isErr || !strings.Contains(text, "myapp.t1") || strings.Contains(text, "myapp.v1") || strings.Contains(text, "mysql.user") {
 			t.Errorf("isErr=%v text=%s", isErr, text)
 		}
 	})
