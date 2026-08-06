@@ -25,6 +25,7 @@ type deps struct {
 	ex             *executor.Executor
 	log            *audit.Logger
 	db             string
+	maxRows        int
 	maxScriptStmts int
 }
 
@@ -49,7 +50,14 @@ type StatsIn struct {
 
 // Build 装配 MCP server；main 与 E2E 测试共用。
 func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit.Logger) *mcp.Server {
-	d := &deps{g: g, ex: ex, log: log, db: cfg.MySQL.Database, maxScriptStmts: cfg.Security.MaxScriptStatements}
+	d := &deps{
+		g:              g,
+		ex:             ex,
+		log:            log,
+		db:             cfg.MySQL.Database,
+		maxRows:        cfg.Security.MaxRows,
+		maxScriptStmts: cfg.Security.MaxScriptStatements,
+	}
 	resources := &tableResourceRegistry{}
 	var s *mcp.Server
 	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.2.1"}, &mcp.ServerOptions{
@@ -80,7 +88,7 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 	}, d.handleScript)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_list_tables",
-		Description: "List all base tables visible through the table whitelist.",
+		Description: "List base tables visible through the table whitelist, capped by security.max_rows.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleListTables)
 	mcp.AddTool(s, &mcp.Tool{
@@ -162,10 +170,10 @@ func (d *deps) handleExecute(ctx context.Context, req *mcp.CallToolRequest, in E
 
 func (d *deps) handleListTables(ctx context.Context, req *mcp.CallToolRequest, in ListTablesIn) (*mcp.CallToolResult, any, error) {
 	start := time.Now()
-	tables, err := d.listVisibleBaseTables(ctx)
+	tables, truncated, err := d.listVisibleBaseTablesUpTo(ctx, d.maxRows)
 	rec := audit.Record{
 		Timestamp: time.Now(), Tool: "mysql_list_tables", SQL: executor.ListBaseTablesSQL,
-		Decision: "allowed", Class: "utility",
+		Decision: "allowed", Class: "utility", Truncated: truncated,
 		DurationMS: time.Since(start).Milliseconds(),
 	}
 	if err != nil {
@@ -179,10 +187,21 @@ func (d *deps) handleListTables(ctx context.Context, req *mcp.CallToolRequest, i
 	}
 	rec.Rows = int64(len(lines))
 	d.log.Log(rec)
-	if len(lines) == 0 {
+	if len(lines) == 0 && !truncated {
 		return textResult("no tables are visible through the whitelist"), nil, nil
 	}
-	return textResult(strings.Join(lines, "\n")), nil, nil
+	text := strings.Join(lines, "\n")
+	if truncated {
+		if text != "" {
+			text += "\n"
+		}
+		tableWord := "tables"
+		if len(lines) == 1 {
+			tableWord = "table"
+		}
+		text += fmt.Sprintf("(truncated at %d %s by security.max_rows)", len(lines), tableWord)
+	}
+	return textResult(text), nil, nil
 }
 
 var identRe = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)

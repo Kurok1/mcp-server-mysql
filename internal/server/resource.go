@@ -74,6 +74,29 @@ func (d *deps) listVisibleBaseTables(ctx context.Context) ([]executor.TableRef, 
 	return visible, nil
 }
 
+func (d *deps) listVisibleBaseTablesUpTo(ctx context.Context, maxRows int) ([]executor.TableRef, bool, error) {
+	if maxRows < 0 {
+		maxRows = 0
+	}
+	var visible []executor.TableRef
+	truncated := false
+	err := d.ex.WalkBaseTables(ctx, func(table executor.TableRef) bool {
+		if !d.g.TableAllowed(table.Database, table.Table) {
+			return true
+		}
+		if len(visible) >= maxRows {
+			truncated = true
+			return false
+		}
+		visible = append(visible, table)
+		return true
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return visible, truncated, nil
+}
+
 func tableResourceURI(table executor.TableRef) string {
 	return "mysql:///schema/" + url.PathEscape(table.Database) + "/" + url.PathEscape(table.Table)
 }

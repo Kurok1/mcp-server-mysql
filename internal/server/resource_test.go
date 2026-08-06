@@ -194,6 +194,24 @@ func TestE2EResourceIgnoresSelectStatementSetting(t *testing.T) {
 	if _, err := sess.ReadResource(ctx, &mcp.ReadResourceParams{URI: listed.Resources[0].URI}); err != nil {
 		t.Fatalf("ReadResource without select: %v", err)
 	}
+	exactTables, truncated, err := (&deps{
+		g:  guard.New(cfg.Security, cfg.MySQL.Database),
+		ex: stack.ex,
+	}).listVisibleBaseTablesUpTo(ctx, 2)
+	if err != nil || len(exactTables) != 2 || truncated {
+		t.Fatalf("table list at exact limit: tables=%#v truncated=%v err=%v", exactTables, truncated, err)
+	}
+
+	tablesText, isErr := callText(t, sess, "mysql_list_tables", map[string]any{})
+	if isErr {
+		t.Fatalf("mysql_list_tables with max_rows=1 failed: %s", tablesText)
+	}
+	if !strings.Contains(tablesText, "myapp.t1") || strings.Contains(tablesText, "myapp.t2") {
+		t.Fatalf("mysql_list_tables did not apply max_rows after whitelist filtering: %s", tablesText)
+	}
+	if !strings.Contains(tablesText, "truncated at 1 table") {
+		t.Fatalf("mysql_list_tables did not report truncation: %s", tablesText)
+	}
 }
 
 func TestResourceDiscoveryFailureKeepsServerAvailable(t *testing.T) {

@@ -26,33 +26,53 @@ type TableRef struct {
 // account. Unlike Query, metadata discovery is intentionally not capped by
 // security.max_rows; MCP applies pagination to the registered resources.
 func (e *Executor) ListBaseTables(ctx context.Context) ([]TableRef, error) {
+	var tables []TableRef
+	err := e.WalkBaseTables(ctx, func(table TableRef) bool {
+		tables = append(tables, table)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tables, nil
+}
+
+// WalkBaseTables visits base tables in information_schema order. Returning
+// false from visit stops the scan early, which lets bounded consumers avoid
+// materializing the complete metadata result.
+func (e *Executor) WalkBaseTables(ctx context.Context, visit func(TableRef) bool) error {
+	if visit == nil {
+		return fmt.Errorf("walk base tables: nil visitor")
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
 	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("begin metadata transaction: %w", err)
+		return fmt.Errorf("begin metadata transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, ListBaseTablesSQL)
 	if err != nil {
-		return nil, fmt.Errorf("list base tables: %w", err)
+		return fmt.Errorf("list base tables: %w", err)
 	}
 	defer rows.Close()
 
-	var tables []TableRef
 	for rows.Next() {
 		var table TableRef
 		if err := rows.Scan(&table.Database, &table.Table); err != nil {
-			return nil, fmt.Errorf("scan base table: %w", err)
+			return fmt.Errorf("scan base table: %w", err)
 		}
-		tables = append(tables, table)
+		if !visit(table) {
+			return nil
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list base tables: %w", err)
+		return fmt.Errorf("list base tables: %w", err)
 	}
-	return tables, nil
+	return nil
 }
 
 // ShowCreateTable returns MySQL's current CREATE TABLE statement. Identifiers
