@@ -1,0 +1,9 @@
+.git
+.codex
+**/node_modules
+ui/query-results/dist
+dist
+*.log
+*.jsonl
+config.yaml
+config.local.yaml

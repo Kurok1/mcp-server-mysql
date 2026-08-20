@@ -1,0 +1,32 @@
+<!--
+  @author Kurok1 <im.kurokyhanc@gmail.com>
+  @since 1.2.1
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Query results design comparison</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 12px; background: #e9ebef; color: #17191d; font: 600 14px Inter, system-ui, sans-serif; }
+      main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      figure { min-width: 0; margin: 0; padding: 8px; border: 1px solid #cfd3da; border-radius: 8px; background: white; }
+      figcaption { padding: 0 0 8px; }
+      img { display: block; width: 100%; aspect-ratio: 1440 / 1024; object-fit: fill; border: 1px solid #e1e4e8; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <figure>
+        <figcaption>Reference — selected second concept</figcaption>
+        <img src="../../ui/query-results/reference/query-results-v2.png" alt="Selected query-results reference" />
+      </figure>
+      <figure>
+        <figcaption>Implementation — 1440 × 1024</figcaption>
+        <img src="query-results-1440x1024.png" alt="Rendered query-results implementation" />
+      </figure>
+    </main>
+  </body>
+</html>

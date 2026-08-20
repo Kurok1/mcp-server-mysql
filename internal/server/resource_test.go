@@ -91,11 +91,20 @@ func TestE2EResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	if len(listed.Resources) != 1 {
-		t.Fatalf("resources = %#v, want exactly myapp.t1", listed.Resources)
+	if len(listed.Resources) != 2 {
+		t.Fatalf("resources = %#v, want query app and myapp.t1", listed.Resources)
 	}
-	r := listed.Resources[0]
-	if r.URI != "mysql:///schema/myapp/t1" || r.Name != "myapp.t1" || r.Title != "myapp.t1" {
+	var r *mcp.Resource
+	for _, resource := range listed.Resources {
+		if resource.URI == "mysql:///schema/myapp/t1" {
+			r = resource
+			break
+		}
+	}
+	if r == nil {
+		t.Fatalf("myapp.t1 resource missing: %#v", listed.Resources)
+	}
+	if r.Name != "myapp.t1" || r.Title != "myapp.t1" {
 		t.Errorf("unexpected resource identity: %#v", r)
 	}
 	if r.MIMEType != "application/sql" {
@@ -146,7 +155,7 @@ func TestE2EResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources after CREATE: %v", err)
 	}
-	if len(listed.Resources) != 1 {
+	if len(listed.Resources) != 2 {
 		t.Errorf("resource snapshot changed after CREATE: %#v", listed.Resources)
 	}
 
@@ -188,10 +197,19 @@ func TestE2EResourceIgnoresSelectStatementSetting(t *testing.T) {
 	t.Cleanup(func() { sess.Close() })
 
 	listed, err := sess.ListResources(ctx, nil)
-	if err != nil || len(listed.Resources) != 2 {
+	if err != nil {
 		t.Fatalf("ListResources without select: resources=%#v err=%v", listed, err)
 	}
-	if _, err := sess.ReadResource(ctx, &mcp.ReadResourceParams{URI: listed.Resources[0].URI}); err != nil {
+	var tableResources []*mcp.Resource
+	for _, resource := range listed.Resources {
+		if strings.HasPrefix(resource.URI, "mysql:///schema/") {
+			tableResources = append(tableResources, resource)
+		}
+	}
+	if len(tableResources) != 2 {
+		t.Fatalf("table resources without select = %#v, want two", tableResources)
+	}
+	if _, err := sess.ReadResource(ctx, &mcp.ReadResourceParams{URI: tableResources[0].URI}); err != nil {
 		t.Fatalf("ReadResource without select: %v", err)
 	}
 	exactTables, truncated, err := (&deps{
@@ -258,8 +276,8 @@ func TestResourceDiscoveryFailureKeepsServerAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources after discovery failure: %v", err)
 	}
-	if len(listed.Resources) != 0 {
-		t.Fatalf("resources = %#v, want empty list", listed.Resources)
+	if len(listed.Resources) != 1 || listed.Resources[0].URI != queryResultsResourceURI {
+		t.Fatalf("resources = %#v, want only the fixed query results app", listed.Resources)
 	}
 	tools, err := sess.ListTools(ctx, nil)
 	if err != nil || len(tools.Tools) != 7 {

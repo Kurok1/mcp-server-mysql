@@ -60,21 +60,21 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 	}
 	resources := &tableResourceRegistry{}
 	var s *mcp.Server
-	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "1.3.1"}, &mcp.ServerOptions{
-		Capabilities: &mcp.ServerCapabilities{
-			Logging:   &mcp.LoggingCapabilities{},
-			Resources: &mcp.ResourceCapabilities{ListChanged: true},
-		},
+	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.0.0"}, &mcp.ServerOptions{
+		Capabilities: queryAppCapabilities(),
 		InitializedHandler: func(ctx context.Context, _ *mcp.InitializedRequest) {
 			resources.load(ctx, s, d)
 		},
 	})
+	s.AddReceivingMiddleware(resources.discoveryMiddleware(s, d))
 
 	truePtr := true
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "mysql_query",
-		Description: "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN). Subject to the table whitelist, row cap and query timeout.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		Meta:         queryToolMeta(),
+		Name:         "mysql_query",
+		Description:  "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN). Subject to the table whitelist, row cap and query timeout.",
+		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
+		OutputSchema: queryOutputSchema(),
 	}, d.handleQuery)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_execute",
@@ -106,6 +106,7 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 		Description: "Return the execution plan for a single SELECT. format: traditional (default) / json / tree; analyze=true runs EXPLAIN ANALYZE (actually executes the query and returns real timing/rows).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleExplain)
+	registerQueryAppResource(s)
 	return s
 }
 
@@ -134,10 +135,12 @@ func (d *deps) run(ctx context.Context, tool, sqlText string, gt guard.Tool) *mc
 	start := time.Now()
 	var text string
 	var execErr error
+	var queryResult *executor.QueryResult
 	if gt == guard.ToolQuery {
 		res, err := d.ex.Query(ctx, sqlText)
 		execErr = err
 		if err == nil {
+			queryResult = res
 			rec.Rows = int64(len(res.Rows))
 			rec.Truncated = res.Truncated
 			text = formatResult(res)
@@ -157,6 +160,9 @@ func (d *deps) run(ctx context.Context, tool, sqlText string, gt guard.Tool) *mc
 		return errResult("execution failed: " + execErr.Error())
 	}
 	d.log.Log(rec)
+	if tool == "mysql_query" && queryResult != nil {
+		return queryAppResult(text, d.db, sqlText, dec.Tables, queryResult, rec.DurationMS, time.Now())
+	}
 	return textResult(text)
 }
 

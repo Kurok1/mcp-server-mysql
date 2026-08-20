@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -18,12 +20,15 @@ import (
 	"github.com/Kurok1/mcp-server-mysql/internal/executor"
 	"github.com/Kurok1/mcp-server-mysql/internal/guard"
 	"github.com/Kurok1/mcp-server-mysql/internal/server"
+	httptransport "github.com/Kurok1/mcp-server-mysql/internal/transport"
 )
 
 // main 只做装配。注意：stdout 是 MCP 协议通道，所有日志走 stderr（slog 默认）。
 func main() {
 	cfgPath := flag.String("config", os.Getenv("MYSQL_MCP_CONFIG"),
 		"path to config file (or set MYSQL_MCP_CONFIG)")
+	transport := flag.String("transport", "stdio", "MCP transport: stdio or streamable-http")
+	listen := flag.String("listen", "127.0.0.1:3001", "loopback address for streamable-http")
 	flag.Parse()
 	if *cfgPath == "" {
 		fmt.Fprintln(os.Stderr, "usage: mcp-server-mysql --config /path/to/config.yaml")
@@ -52,13 +57,27 @@ func main() {
 
 	g := guard.New(cfg.Security, cfg.MySQL.Database)
 	s := server.Build(cfg, g, ex, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	slog.Info("mcp-server-mysql starting",
 		"database", cfg.MySQL.Database,
+		"transport", *transport,
+		"listen", *listen,
 		"allowed_statements", cfg.Security.AllowedStatements,
 		"audit_enabled", cfg.Audit.Enabled,
 		"audit_dir", cfg.Audit.LogDir)
-	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		slog.Error("server exited", "err", err)
+	var runErr error
+	switch *transport {
+	case "stdio":
+		runErr = s.Run(ctx, &mcp.StdioTransport{})
+	case "streamable-http":
+		runErr = httptransport.RunHTTP(ctx, *listen, s)
+	default:
+		fmt.Fprintf(os.Stderr, "invalid --transport %q (want stdio or streamable-http)\n", *transport)
+		os.Exit(2)
+	}
+	if runErr != nil {
+		slog.Error("server exited", "err", runErr)
 		os.Exit(1)
 	}
 }

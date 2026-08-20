@@ -28,7 +28,8 @@
 - **结构化审计（可选落盘）** —— JSONL 按天滚动，被拒绝的 SQL 连同命中的规则名一起记录。默认关闭：不开就不写任何日志文件。
 - **原子脚本执行** —— `mysql_script` 把多语句脚本包在单个事务里执行，每条语句先逐一重新过安全闸；任一条失败整体回滚。脚本内禁 DDL——MySQL 的隐式提交会破坏原子性。
 - **执行计划分析** —— `mysql_explain` 支持 `traditional` / `json` / `tree` 三种格式与 `EXPLAIN ANALYZE`。
-- **好跑、可信面小** —— 单个静态 Go 二进制，stdio 通信，基于官方 [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk)；Docker 镜像为 distroless、非 root 运行。
+- **交互式查询结果** —— 支持 MCP Apps 的 Host 会把 `mysql_query` 渲染成可筛选、排序、选择、控制列和复制 TSV/CSV/JSON 的表格，并保留当前 View 内的查询历史；其他 Host 仍收到原有文本结果。
+- **好跑、可信面小** —— 单个静态 Go 二进制，默认 stdio 通信，基于官方 [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk)；Docker 镜像为 distroless、非 root 运行。
 
 ## MCP 工具
 
@@ -141,6 +142,25 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 > **Docker 注意 1：审计日志必须落在挂载卷内。** 容器随会话销毁，若开启审计落盘，`audit.log_dir` 务必指向挂载卷（如 `/data/logs`），否则日志随容器一起消失。
 >
 > **Docker 注意 2：连接宿主机 MySQL 的地址。** macOS/Windows 把 `mysql.host` 配成 `host.docker.internal`；Linux 同样如此，且还需在 `args` 中追加 `"--add-host=host.docker.internal:host-gateway"`。
+
+## 交互式查询结果（MCP Apps）
+
+`mysql_query` 会向支持 [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) 的 Host 声明内嵌资源 `ui://mcp-server-mysql/query-results`。查询成功时同时返回原有可读文本和结构化查询数据，因此旧版或纯文本 Host 会自然降级，不会丢失结果。其余六个工具保持纯文本模式。
+
+结果页在当前 View 内最多保留 20 份快照，支持全局筛选、可选 `status` 筛选、自然数值排序、列显隐、行选择，以及 TSV/CSV/JSON 复制。刷新会通过 Host 再次调用 `mysql_query`；若 Host 未向 App 开放工具调用能力，页面会明确提示刷新不可用，其他只读交互仍可使用。历史只保存在内存中，关闭 View 即清空。
+
+### 本地 Basic Host 开发
+
+生产环境和默认传输仍是 stdio。项目额外提供仅供本地 MCP Apps 开发使用的无状态 Streamable HTTP 端点：
+
+```bash
+MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
+  --config ~/.mcp-server-mysql/config.yaml \
+  --transport streamable-http \
+  --listen 127.0.0.1:3001
+```
+
+在官方 Basic Host 中连接 `http://127.0.0.1:3001/mcp`。HTTP 监听会拒绝通配地址和非回环地址，CORS 也只允许本机 `8080` 端口上的 Basic Host 来源；它没有远程部署所需的认证能力，请勿暴露到公网。
 
 ## 安全模型
 
@@ -273,7 +293,8 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 ## 兼容性
 
 - **MySQL 8.x** —— E2E 测试基于 testcontainers 在 MySQL 8.0（8.0.45）上运行。MySQL 5.7 与 MariaDB 未经测试。
-- **传输** —— stdio；server 标识为 `mcp-server-mysql`。暴露 7 个工具及 MySQL 表结构 direct Resources（无 prompts）。
+- **MCP** —— 使用 Go SDK v1.7.0，提供 MySQL 表结构 direct Resources，声明 `io.modelcontextprotocol/ui` 扩展并内嵌一个 MCP App 资源；不支持 MCP Apps 的 Host 仍可使用文本降级结果。
+- **传输** —— 默认 stdio；本地开发可使用仅回环监听的无状态 Streamable HTTP。server 标识为 `mcp-server-mysql`，暴露 7 个工具、表结构 direct Resources、1 个 UI 资源，无 prompts。
 - **运行时消息** —— 工具描述与运行时输出（结果标注、`DENIED` 原因）为英文，便于各类客户端与国际用户使用；规则名与审计字段本就是英文，保持稳定。
 
 ## 开发
@@ -281,7 +302,16 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 ```bash
 go test ./... -short           # 单元测试（不需要 Docker）
 go test ./... -timeout 600s    # 全量，含 testcontainers 集成/E2E 测试（需要 Docker）
+
+cd ui/query-results
+npm ci
+npm run typecheck
+npm test
+npm run build                  # 重建提交到仓库的 internal/ui/query-results.html
+npm run test:sites
 ```
+
+前端使用 React/TypeScript、`@modelcontextprotocol/ext-apps` 和 `vite-plugin-singlefile`。构建会生成单个完全内联的 HTML，并复制到由 Go 嵌入二进制的 `internal/ui/query-results.html`；因此普通 `go build` 不需要 Node。Dockerfile 会在 Node 阶段重新构建前端，并在编译 Go 前覆盖仓库中已提交的 bundle，避免发布镜像携带陈旧 UI。
 
 设计文档在 [docs/superpowers](docs/superpowers/)——每个特性都有对应的 spec 与实施计划。
 
