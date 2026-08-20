@@ -2,7 +2,7 @@
  * @author Kurok1 <im.kurokyhanc@gmail.com>
  * @since 1.2.1
  */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MCPAppState, MCPHandlers } from "./useMcpApp";
 import { previewResult } from "./model";
@@ -54,6 +54,43 @@ describe("query results host states", () => {
     act(() => handlers().onToolResult({ isError: true, content: [{ type: "text", text: "database unavailable" }] }));
     expect(screen.getAllByText("Query failed").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("database unavailable")).toBeInTheDocument();
+  });
+
+  it("uses a neutral database label before the embedded host returns a result", () => {
+    render(<App />);
+
+    expect(screen.getByText("mysql")).toBeInTheDocument();
+    expect(screen.queryByText("analytics")).not.toBeInTheDocument();
+  });
+
+  it("resets hidden columns when switching result history", () => {
+    const { container } = render(<App />);
+    act(() => handlers().onToolResult({
+      structuredContent: {
+        ...previewResult,
+        resultId: "older",
+        columns: ["id", "legacy"],
+        rows: [["1", "kept"]],
+        rowCount: 1,
+      },
+    }));
+    act(() => handlers().onToolResult({
+      structuredContent: {
+        ...previewResult,
+        resultId: "newer",
+        columns: ["customer", "status"],
+        rows: [["Acme Labs", "Active"]],
+        rowCount: 1,
+      },
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+    fireEvent.click(within(screen.getByText("status", { selector: "label" })).getByRole("checkbox"));
+    expect(screen.queryByRole("columnheader", { name: "status" })).not.toBeInTheDocument();
+
+    const historyItems = container.querySelectorAll<HTMLButtonElement>(".history-item");
+    fireEvent.click(historyItems[1]);
+    expect(screen.getByRole("columnheader", { name: "legacy" })).toBeInTheDocument();
   });
 
   it("renders empty rows, truncation and the no-refresh capability message", () => {

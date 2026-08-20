@@ -20,6 +20,7 @@ describe("query results app", () => {
   it("filters, sorts, hides columns and selects rows", () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: "accounts" })).toBeInTheDocument();
+    expect(screen.getByText("analytics")).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("Filter 10 rows…"), { target: { value: "Kite" } });
     expect(screen.getByText("Kite Robotics")).toBeInTheDocument();

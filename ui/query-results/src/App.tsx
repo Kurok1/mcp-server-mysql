@@ -147,7 +147,7 @@ function HistorySidebar({
 }: {
   history: HistoryEntry[];
   activeID: string;
-  database: string;
+  database?: string;
   locale: Locale;
   open: boolean;
   onSelect: (id: string) => void;
@@ -338,6 +338,7 @@ export function App() {
     setFilter("");
     setStatus("");
     setSort(null);
+    setHiddenColumns(new Set());
     setSelectedRows(new Set());
   };
 
@@ -414,7 +415,7 @@ export function App() {
 
   return (
     <div className="app-frame">
-      <HistorySidebar history={history} activeID={active?.id || ""} database={result?.database || previewResult.database} locale={locale} open={historyOpen} onSelect={selectHistory} onClose={() => setHistoryOpen(false)} />
+      <HistorySidebar history={history} activeID={active?.id || ""} database={result?.database ?? (mcp.preview ? previewResult.database : undefined)} locale={locale} open={historyOpen} onSelect={selectHistory} onClose={() => setHistoryOpen(false)} />
       {historyOpen && <button type="button" className="drawer-backdrop" aria-label={t.closeHistory} onClick={() => setHistoryOpen(false)} />}
       <main className="results-panel">
         <header className="result-header">

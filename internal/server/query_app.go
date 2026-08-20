@@ -121,6 +121,13 @@ func newResultID() string {
 	return fmt.Sprintf("%d-%d", time.Now().UTC().UnixNano(), resultSequence.Add(1))
 }
 
+func nonNilSlice[T any](values []T) []T {
+	if values == nil {
+		return []T{}
+	}
+	return values
+}
+
 func queryAppResult(
 	text, database, sqlText string,
 	tables []string,
@@ -135,9 +142,9 @@ func queryAppResult(
 			Tool:       "mysql_query",
 			Database:   database,
 			SQL:        sqlText,
-			Tables:     tables,
-			Columns:    result.Columns,
-			Rows:       result.Rows,
+			Tables:     nonNilSlice(tables),
+			Columns:    nonNilSlice(result.Columns),
+			Rows:       nonNilSlice(result.Rows),
 			RowCount:   len(result.Rows),
 			Truncated:  result.Truncated,
 			DurationMS: durationMS,

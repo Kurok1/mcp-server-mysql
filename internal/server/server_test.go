@@ -81,6 +81,18 @@ func TestQueryAppResult(t *testing.T) {
 		t.Fatalf("executedAt = %q", payload.ExecutedAt)
 	}
 
+	empty := queryAppResult(
+		formatResult(&executor.QueryResult{}), "myapp", "SELECT 1 WHERE FALSE",
+		nil, &executor.QueryResult{}, 1, executedAt,
+	)
+	emptyPayload, ok := empty.StructuredContent.(QueryAppResult)
+	if !ok {
+		t.Fatalf("empty structured content is %T, want QueryAppResult", empty.StructuredContent)
+	}
+	if emptyPayload.Tables == nil || emptyPayload.Columns == nil || emptyPayload.Rows == nil {
+		t.Fatalf("structured array fields must not be nil: %+v", emptyPayload)
+	}
+
 	failed := errResult("execution failed")
 	if !failed.IsError || failed.StructuredContent != nil {
 		t.Fatalf("error result must remain text-only: %+v", failed)
