@@ -26,6 +26,21 @@ type tableResourceRegistry struct {
 	uris []string
 }
 
+// discoveryMiddleware refreshes the table-resource snapshot before the
+// 2026-07-28 server/discover response is assembled. That protocol version no
+// longer sends notifications/initialized, so the legacy InitializedHandler
+// alone would never register dynamic resources for modern clients.
+func (r *tableResourceRegistry) discoveryMiddleware(s *mcp.Server, d *deps) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "server/discover" {
+				r.load(ctx, s, d)
+			}
+			return next(ctx, method, req)
+		}
+	}
+}
+
 // load replaces the process-wide table resource snapshot for a newly
 // initialized MCP connection. It is deliberately synchronous: on the current
 // ordered stdio transport, a following resources/list request is handled only

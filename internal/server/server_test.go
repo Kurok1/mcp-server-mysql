@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,163 @@ func TestFormatResultTruncated(t *testing.T) {
 	got := formatResult(res)
 	if !strings.Contains(got, "truncated") {
 		t.Errorf("missing truncation notice:\n%s", got)
+	}
+}
+
+func TestQueryAppResult(t *testing.T) {
+	executedAt := time.Date(2026, 8, 20, 2, 0, 0, 0, time.UTC)
+	query := &executor.QueryResult{
+		Columns:   []string{"id", "name"},
+		Rows:      [][]string{{"1", "NULL"}},
+		Truncated: true,
+	}
+	got := queryAppResult(
+		formatResult(query), "myapp", "SELECT id, name FROM accounts",
+		[]string{"myapp.accounts"}, query, 12, executedAt,
+	)
+	if got.IsError {
+		t.Fatal("query app result unexpectedly marked as error")
+	}
+	if len(got.Content) != 1 {
+		t.Fatalf("content length = %d, want 1", len(got.Content))
+	}
+	text, ok := got.Content[0].(*mcp.TextContent)
+	if !ok || !strings.Contains(text.Text, "truncated") {
+		t.Fatalf("text fallback = %#v, want truncation notice", got.Content[0])
+	}
+	payload, ok := got.StructuredContent.(QueryAppResult)
+	if !ok {
+		t.Fatalf("structured content is %T, want QueryAppResult", got.StructuredContent)
+	}
+	if payload.ResultID == "" || payload.Tool != "mysql_query" || payload.Database != "myapp" {
+		t.Fatalf("unexpected identity fields: %+v", payload)
+	}
+	if payload.RowCount != 1 || !payload.Truncated || payload.Rows[0][1] != "NULL" {
+		t.Fatalf("query values were not preserved: %+v", payload)
+	}
+	if payload.ExecutedAt != "2026-08-20T02:00:00Z" {
+		t.Fatalf("executedAt = %q", payload.ExecutedAt)
+	}
+
+	failed := errResult("execution failed")
+	if !failed.IsError || failed.StructuredContent != nil {
+		t.Fatalf("error result must remain text-only: %+v", failed)
+	}
+}
+
+func startMetadataSession(t *testing.T) *mcp.ClientSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := &config.Config{
+		MySQL: config.MySQLConfig{
+			Host: "127.0.0.1", Port: 1, User: "unreachable", Database: "myapp",
+			Pool: config.PoolConfig{MaxOpen: 1, MaxIdle: 1},
+		},
+		Security: config.SecurityConfig{
+			AllowedStatements: []string{"select"},
+			TableWhitelist:    []string{"myapp.*"},
+			MaxRows:           100,
+			QueryTimeout:      config.Duration(100 * time.Millisecond),
+		},
+	}
+	ex, err := executor.New(cfg.MySQL, cfg.Security)
+	if err != nil {
+		t.Fatalf("executor.New: %v", err)
+	}
+	t.Cleanup(func() { _ = ex.Close() })
+	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), ex, nil)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go func() { _ = srv.Run(ctx, serverTransport) }()
+
+	clientCaps := &mcp.ClientCapabilities{}
+	clientCaps.AddExtension(uiExtensionID, map[string]any{
+		"mimeTypes": []string{queryResultsResourceMIME},
+	})
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "metadata-test", Version: "0"},
+		&mcp.ClientOptions{Capabilities: clientCaps},
+	)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+func TestQueryAppRegistration(t *testing.T) {
+	session := startMetadataSession(t)
+	initResult := session.InitializeResult()
+	if initResult == nil || initResult.Capabilities == nil {
+		t.Fatal("missing server capabilities")
+	}
+	if _, ok := initResult.Capabilities.Extensions[uiExtensionID]; !ok {
+		t.Fatalf("missing %s extension capability: %+v", uiExtensionID, initResult.Capabilities.Extensions)
+	}
+
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var queryTool *mcp.Tool
+	for _, tool := range tools.Tools {
+		if tool.Name == "mysql_query" {
+			queryTool = tool
+			break
+		}
+	}
+	if queryTool == nil {
+		t.Fatal("mysql_query tool not found")
+	}
+	uiMeta, ok := queryTool.Meta["ui"].(map[string]any)
+	if !ok || uiMeta["resourceUri"] != queryResultsResourceURI {
+		t.Fatalf("mysql_query ui metadata = %#v", queryTool.Meta)
+	}
+	visibility, err := json.Marshal(uiMeta["visibility"])
+	if err != nil || string(visibility) != `["model","app"]` {
+		t.Fatalf("mysql_query visibility = %s (err=%v)", visibility, err)
+	}
+	if queryTool.OutputSchema == nil {
+		t.Fatal("mysql_query is missing its structured output schema")
+	}
+
+	resources, err := session.ListResources(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(resources.Resources) != 1 || resources.Resources[0].URI != queryResultsResourceURI {
+		t.Fatalf("resources = %+v", resources.Resources)
+	}
+	if resources.Resources[0].MIMEType != queryResultsResourceMIME {
+		t.Fatalf("resource MIME = %q", resources.Resources[0].MIMEType)
+	}
+	resourceUI, ok := resources.Resources[0].Meta["ui"].(map[string]any)
+	if !ok || resourceUI["prefersBorder"] != true {
+		t.Fatalf("resource metadata = %#v", resources.Resources[0].Meta)
+	}
+
+	read, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: queryResultsResourceURI})
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if len(read.Contents) != 1 || read.Contents[0].MIMEType != queryResultsResourceMIME {
+		t.Fatalf("resource contents = %+v", read.Contents)
+	}
+	if !strings.Contains(read.Contents[0].Text, "<!doctype html>") ||
+		!strings.Contains(read.Contents[0].Text, "mcp-server-mysql-query-results") {
+		t.Fatal("embedded MCP App HTML is missing expected markers")
+	}
+	contentUI, ok := read.Contents[0].Meta["ui"].(map[string]any)
+	if !ok {
+		t.Fatalf("resource contents metadata = %#v", read.Contents[0].Meta)
+	}
+	permissions, ok := contentUI["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("resource permissions = %#v", contentUI["permissions"])
+	}
+	if _, ok := permissions["clipboardWrite"]; !ok {
+		t.Fatalf("clipboard permission missing: %#v", permissions)
 	}
 }
 
@@ -151,9 +309,26 @@ func TestE2E(t *testing.T) {
 	sess := stack.sess
 
 	t.Run("查询白名单内的表", func(t *testing.T) {
-		text, isErr := callText(t, sess, "mysql_query", map[string]any{"sql": "SELECT id, name FROM t1 ORDER BY id"})
-		if isErr || !strings.Contains(text, "alice") {
-			t.Errorf("isErr=%v text=%s", isErr, text)
+		res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "mysql_query", Arguments: map[string]any{"sql": "SELECT id, name FROM t1 ORDER BY id"},
+		})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if res.IsError || !strings.Contains(text, "alice") {
+			t.Errorf("isErr=%v text=%s", res.IsError, text)
+		}
+		encoded, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			t.Fatalf("marshal structured content: %v", err)
+		}
+		var payload QueryAppResult
+		if err := json.Unmarshal(encoded, &payload); err != nil {
+			t.Fatalf("unmarshal structured content: %v", err)
+		}
+		if payload.Database != "myapp" || payload.SQL == "" || payload.RowCount != 2 || payload.Rows[0][1] != "alice" {
+			t.Fatalf("structured content = %+v", payload)
 		}
 	})
 

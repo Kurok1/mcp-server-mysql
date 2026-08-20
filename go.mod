@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/go-sql-driver/mysql v1.10.0
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260702111551-b212b931528a
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -73,7 +73,9 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )

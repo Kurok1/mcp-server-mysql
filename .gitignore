@@ -1,6 +1,8 @@
 # 构建产物
 /mcp-server-mysql
 /dist/
+/ui/query-results/node_modules/
+/ui/query-results/dist/
 
 # 日志与审计
 *.log
@@ -17,3 +19,6 @@ coverage.out
 .idea/
 .vscode/
 .DS_Store
+
+# codebase-map
+.codebase-map

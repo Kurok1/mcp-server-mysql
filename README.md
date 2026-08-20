@@ -28,7 +28,8 @@ This project puts the security boundary on **real SQL semantic parsing** instead
 - **Structured audit, opt-in** — JSONL with daily rotation; denied SQL is recorded with the exact rule that fired. Off by default: no log files unless you enable it.
 - **Atomic scripts** — `mysql_script` runs a multi-statement script in a single transaction with every statement individually re-validated; any failure rolls back everything. DDL is banned inside scripts because MySQL's implicit commit would break atomicity.
 - **Query-plan analysis** — `mysql_explain` with `traditional` / `json` / `tree` formats and `EXPLAIN ANALYZE` support.
-- **Easy to run, small to trust** — a single static Go binary over stdio, built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk); the Docker image is distroless and runs as a non-root user.
+- **Interactive query results** — MCP Apps-capable hosts render `mysql_query` as a filterable, sortable table with per-view history, selection, column controls, and TSV/CSV/JSON copy; other hosts keep receiving the original text result.
+- **Easy to run, small to trust** — a single static Go binary with stdio by default, built on the official [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk); the Docker image is distroless and runs as a non-root user.
 
 ## Tools
 
@@ -141,6 +142,25 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 > **Docker note 1 — audit logs must live on a mounted volume.** The container is destroyed with the session; if you enable audit logging, point `audit.log_dir` at the mounted volume (e.g. `/data/logs`) or the logs vanish with the container.
 >
 > **Docker note 2 — reaching MySQL on the host.** On macOS/Windows set `mysql.host: host.docker.internal`; on Linux also append `"--add-host=host.docker.internal:host-gateway"` to `args`.
+
+## Interactive query results (MCP Apps)
+
+`mysql_query` advertises the embedded `ui://mcp-server-mysql/query-results` resource to hosts that support [MCP Apps](https://github.com/modelcontextprotocol/ext-apps). Successful calls include both the existing human-readable text and structured query data, so older or text-only hosts degrade without losing any result information. The other six tools remain text-only.
+
+The result view keeps up to 20 snapshots inside the current View, supports global and optional `status` filtering, natural numeric sorting, column visibility, row selection, and TSV/CSV/JSON copy. Refresh invokes `mysql_query` again through the host; if the host does not expose tool calling to apps, the view explains that refresh is unavailable while all read-only controls continue to work. View history is memory-only and disappears when the View closes.
+
+### Local Basic Host development
+
+The production/default transport remains stdio. A stateless Streamable HTTP endpoint is available specifically for local MCP Apps development:
+
+```bash
+MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
+  --config ~/.mcp-server-mysql/config.yaml \
+  --transport streamable-http \
+  --listen 127.0.0.1:3001
+```
+
+Connect the official Basic Host to `http://127.0.0.1:3001/mcp`. The HTTP listener rejects wildcard and non-loopback addresses, and its CORS policy only accepts the Basic Host origins on local port `8080`; it is not an authenticated remote deployment mode.
 
 ## Security model
 
@@ -273,14 +293,24 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 ## Compatibility
 
 - **MySQL 8.x** — the E2E suite runs against MySQL 8.0 (8.0.45) via testcontainers. MySQL 5.7 and MariaDB are untested.
-- **Transport** — stdio; server identity `mcp-server-mysql`. Exposes 7 tools and direct MySQL table-schema resources (no prompts).
+- **MCP** — Go SDK v1.7.0, with direct MySQL table-schema resources, the `io.modelcontextprotocol/ui` extension, and one embedded MCP App resource. Text fallback remains available to hosts without MCP Apps.
+- **Transport** — stdio by default; loopback-only stateless Streamable HTTP is available for local development. Server identity is `mcp-server-mysql`; it exposes 7 tools, direct table-schema resources, one UI resource, and no prompts.
 
 ## Development
 
 ```bash
 go test ./... -short           # unit tests (no Docker needed)
 go test ./... -timeout 600s    # full suite incl. testcontainers integration/E2E (needs Docker)
+
+cd ui/query-results
+npm ci
+npm run typecheck
+npm test
+npm run build                  # rebuilds the committed internal/ui/query-results.html
+npm run test:sites
 ```
+
+The frontend uses React/TypeScript, `@modelcontextprotocol/ext-apps`, and `vite-plugin-singlefile`. Its build emits one fully inlined HTML file and copies it to `internal/ui/query-results.html`, which Go embeds into the binary; a normal `go build` therefore does not require Node. The Dockerfile rebuilds the frontend in a Node stage and overwrites that committed bundle before compiling Go, preventing stale UI in release images.
 
 Design docs live in [docs/superpowers](docs/superpowers/) — each feature ships with a spec and an implementation plan.
 
