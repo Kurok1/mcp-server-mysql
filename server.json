@@ -8,11 +8,11 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Kurok1/mcp-server-mysql",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/kurok1/mcp-server-mysql:2.0.0",
+      "identifier": "ghcr.io/kurok1/mcp-server-mysql:2.0.1",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"

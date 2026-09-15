@@ -67,7 +67,7 @@ export function useMcpApp(handlers: MCPHandlers): MCPAppState {
 
     let disposed = false;
     const app = new App(
-      { name: "mcp-server-mysql-query-results", version: "2.0.0" },
+      { name: "mcp-server-mysql-query-results", version: "2.0.1" },
       { availableDisplayModes: ["inline", "fullscreen"] },
       { autoResize: true, strict: true },
     );
