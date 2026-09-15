@@ -21,6 +21,7 @@ import (
 	"github.com/Kurok1/mcp-server-mysql/internal/config"
 	"github.com/Kurok1/mcp-server-mysql/internal/executor"
 	"github.com/Kurok1/mcp-server-mysql/internal/guard"
+	"github.com/Kurok1/mcp-server-mysql/internal/profile"
 )
 
 func TestNormalizeCreateTableDDL(t *testing.T) {
@@ -66,8 +67,8 @@ func TestTableResourceUnavailable(t *testing.T) {
 }
 
 func TestTableResourceURI(t *testing.T) {
-	got := tableResourceURI(executor.TableRef{Database: "db name", Table: "events/2026"})
-	if want := "mysql:///schema/db%20name/events%2F2026"; got != want {
+	got := tableResourceURI("profile one", executor.TableRef{Database: "db name", Table: "events/2026"})
+	if want := "mysql:///schema/profile%20one/db%20name/events%2F2026"; got != want {
 		t.Fatalf("tableResourceURI = %q, want %q", got, want)
 	}
 }
@@ -96,7 +97,7 @@ func TestE2EResources(t *testing.T) {
 	}
 	var r *mcp.Resource
 	for _, resource := range listed.Resources {
-		if resource.URI == "mysql:///schema/myapp/t1" {
+		if resource.URI == "mysql:///schema/primary/myapp/t1" {
 			r = resource
 			break
 		}
@@ -104,7 +105,7 @@ func TestE2EResources(t *testing.T) {
 	if r == nil {
 		t.Fatalf("myapp.t1 resource missing: %#v", listed.Resources)
 	}
-	if r.Name != "myapp.t1" || r.Title != "myapp.t1" {
+	if r.Name != "primary: myapp.t1" || r.Title != "primary: myapp.t1" {
 		t.Errorf("unexpected resource identity: %#v", r)
 	}
 	if r.MIMEType != "application/sql" {
@@ -184,7 +185,7 @@ func TestE2EResourceIgnoresSelectStatementSetting(t *testing.T) {
 	cfg.Security.AllowedStatements = []string{"insert"}
 	cfg.Security.MaxRows = 1
 
-	srv := Build(&cfg, guard.New(cfg.Security, cfg.MySQL.Database), stack.ex, stack.logger)
+	srv := Build(config.ResourcesConfig{}, singleProfile(cfg, stack.ex, stack.logger))
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	go func() { _ = srv.Run(ctx, st) }()
@@ -233,7 +234,7 @@ func TestE2EResourceIgnoresSelectStatementSetting(t *testing.T) {
 }
 
 func TestResourceDiscoveryFailureKeepsServerAvailable(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.ProfileConfig{
 		MySQL: config.MySQLConfig{
 			Host: "127.0.0.1", Port: 1, User: "unreachable", Database: "myapp",
 			Pool: config.PoolConfig{MaxOpen: 1, MaxIdle: 1},
@@ -255,13 +256,13 @@ func TestResourceDiscoveryFailureKeepsServerAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ex.Close() })
-	logger, err := audit.NewLogger(cfg.Audit)
+	logger, err := audit.NewLogger(testProfileName, cfg.Audit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(logger.Close)
+	t.Cleanup(func() { _ = logger.Close() })
 
-	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), ex, logger)
+	srv := Build(config.ResourcesConfig{}, singleProfile(cfg, ex, logger))
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	go func() { _ = srv.Run(ctx, st) }()
@@ -280,7 +281,76 @@ func TestResourceDiscoveryFailureKeepsServerAvailable(t *testing.T) {
 		t.Fatalf("resources = %#v, want only the fixed query results app", listed.Resources)
 	}
 	tools, err := sess.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 7 {
+	if err != nil || len(tools.Tools) != 8 {
 		t.Fatalf("server tools unavailable after discovery failure: tools=%#v err=%v", tools, err)
 	}
+}
+
+func TestE2EResourceDiscoveryFailureIsProfileScoped(t *testing.T) {
+	stack := startStack(t)
+	ctx := context.Background()
+	cfg := *stack.cfg
+	provider := &testProfileProvider{runtimes: map[string]*profile.Runtime{
+		"alpha":  testRuntime("alpha", cfg, stack.ex, stack.logger),
+		"broken": testRuntime("broken", cfg, stack.ex, stack.logger),
+	}}
+	srv := Build(config.ResourcesConfig{}, provider)
+
+	connect := func(name string) *mcp.ClientSession {
+		t.Helper()
+		clientTransport, serverTransport := mcp.NewInMemoryTransports()
+		go func() { _ = srv.Run(ctx, serverTransport) }()
+		client := mcp.NewClient(&mcp.Implementation{Name: name, Version: "0"}, nil)
+		session, err := client.Connect(ctx, clientTransport, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		return session
+	}
+
+	first := connect("resource-profile-refresh-initial")
+	resources, err := first.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResource(resources.Resources, "mysql:///schema/alpha/myapp/t1") || !hasResource(resources.Resources, "mysql:///schema/broken/myapp/t1") {
+		t.Fatalf("initial profile resources = %#v", resources.Resources)
+	}
+
+	brokenCfg := cfg
+	brokenCfg.MySQL.Host = "127.0.0.1"
+	brokenCfg.MySQL.Port = 1
+	brokenCfg.MySQL.User = "unreachable"
+	brokenCfg.Security.QueryTimeout = config.Duration(100 * time.Millisecond)
+	brokenExecutor, err := executor.New(brokenCfg.MySQL, brokenCfg.Security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = brokenExecutor.Close() })
+	provider.mu.Lock()
+	provider.runtimes["broken"] = testRuntime("broken", brokenCfg, brokenExecutor, stack.logger)
+	provider.mu.Unlock()
+
+	second := connect("resource-profile-refresh-failure")
+	resources, err = second.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResource(resources.Resources, "mysql:///schema/alpha/myapp/t1") || hasResource(resources.Resources, "mysql:///schema/broken/myapp/t1") {
+		t.Fatalf("failed profile refresh altered resource snapshot incorrectly: %#v", resources.Resources)
+	}
+	tools, err := second.ListTools(ctx, nil)
+	if err != nil || len(tools.Tools) != 8 {
+		t.Fatalf("tools after profile discovery failure = %#v, err=%v", tools, err)
+	}
+}
+
+func hasResource(resources []*mcp.Resource, uri string) bool {
+	for _, resource := range resources {
+		if resource.URI == uri {
+			return true
+		}
+	}
+	return false
 }

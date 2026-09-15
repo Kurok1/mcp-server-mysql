@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 func newTestLogger(t *testing.T, ringSize int) *Logger {
 	t.Helper()
 	dir := t.TempDir()
-	l, err := NewLogger(config.AuditConfig{
+	l, err := NewLogger("app", config.AuditConfig{
 		Enabled:            true, // 落盘相关测试需开启
 		LogDir:             dir,
 		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
@@ -33,7 +34,7 @@ func newTestLogger(t *testing.T, ringSize int) *Logger {
 
 func TestDisabledSkipsFileButKeepsStats(t *testing.T) {
 	dir := t.TempDir()
-	l, err := NewLogger(config.AuditConfig{
+	l, err := NewLogger("app", config.AuditConfig{
 		Enabled:            false,
 		LogDir:             dir,
 		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
@@ -64,7 +65,7 @@ func TestDisabledSkipsFileButKeepsStats(t *testing.T) {
 func TestDisabledSkipsDirCreation(t *testing.T) {
 	// 关闭时不创建日志目录：指向一个不存在的子路径也不应报错
 	dir := filepath.Join(t.TempDir(), "does-not-exist-yet")
-	l, err := NewLogger(config.AuditConfig{
+	l, err := NewLogger("app", config.AuditConfig{
 		Enabled:            false,
 		LogDir:             dir,
 		SlowQueryThreshold: config.Duration(100 * time.Millisecond),
@@ -103,7 +104,7 @@ func TestLogWritesJSONL(t *testing.T) {
 	l.Log(rec("SELECT * FROM secret.t", 0, 0, true))
 
 	// 文件名按记录时间戳的日期滚动
-	path := filepath.Join(l.Dir(), "audit-2026-07-02.jsonl")
+	path := filepath.Join(l.Dir(), "audit-app-2026-07-02.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
@@ -123,6 +124,54 @@ func TestLogWritesJSONL(t *testing.T) {
 	}
 	if lines[1].Decision != "denied" || lines[1].Rule != "table_whitelist" {
 		t.Errorf("denied record not persisted correctly: %+v", lines[1])
+	}
+	if lines[0].Profile != "app" || lines[1].Profile != "app" {
+		t.Errorf("logger did not centrally apply profile identity: %+v", lines)
+	}
+}
+
+func TestSharedDirectoryKeepsProfilesIndependent(t *testing.T) {
+	dir := t.TempDir()
+	newLogger := func(t *testing.T, profile string, ringSize int) *Logger {
+		t.Helper()
+		l, err := NewLogger(profile, config.AuditConfig{
+			Enabled: true, LogDir: dir, RingBufferSize: ringSize,
+			SlowQueryThreshold: config.Duration(time.Second),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		return l
+	}
+	alpha := newLogger(t, "alpha", 1)
+	beta := newLogger(t, "beta", 3)
+	wrongIdentity := rec("alpha-one", time.Millisecond, 1, false)
+	wrongIdentity.Profile = "beta"
+	alpha.Log(wrongIdentity)
+	alpha.Log(rec("alpha-two", time.Millisecond, 1, false))
+	beta.Log(rec("beta-one", time.Millisecond, 1, false))
+
+	alphaStats := alpha.Stats(5)
+	betaStats := beta.Stats(5)
+	if alphaStats.Profile != "alpha" || alphaStats.Total != 1 || betaStats.Profile != "beta" || betaStats.Total != 1 {
+		t.Errorf("stats should remain profile-local: alpha=%+v beta=%+v", alphaStats, betaStats)
+	}
+	for _, profile := range []string{"alpha", "beta"} {
+		path := filepath.Join(dir, "audit-"+profile+"-2026-07-02.jsonl")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !strings.Contains(string(data), `"profile":"`+profile+`"`) {
+			t.Errorf("%s does not contain its logger identity: %s", path, data)
+		}
+	}
+}
+
+func TestNewLoggerRejectsUnsafeProfileName(t *testing.T) {
+	if _, err := NewLogger("../escape", config.AuditConfig{RingBufferSize: 1}); err == nil {
+		t.Error("NewLogger accepted unsafe profile name")
 	}
 }
 

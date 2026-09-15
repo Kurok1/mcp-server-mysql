@@ -11,6 +11,7 @@ import {
   previewResult,
   serializeRows,
   titleForResult,
+  unattributedHistoryEntry,
   visibleRows,
   type HistoryEntry,
 } from "./model";
@@ -19,22 +20,35 @@ describe("query result model", () => {
   it("validates structured query results", () => {
     expect(parseQueryPayload(previewResult)).toEqual(previewResult);
     expect(parseQueryPayload({ ...previewResult, rows: [[1]] })).toBeNull();
+    expect(parseQueryPayload({ ...previewResult, profile: "" })).toBeNull();
+    expect(parseQueryPayload({ ...previewResult, profile: undefined })).toBeNull();
   });
 
   it("keeps text errors and de-duplicates successful result ids", () => {
-    const success = historyEntryFromToolResult({ structuredContent: previewResult });
+    const success = historyEntryFromToolResult(
+      { structuredContent: previewResult },
+      { profile: previewResult.profile, sql: previewResult.sql },
+    );
     const duplicate = addHistory([success], success);
     expect(duplicate).toHaveLength(1);
 
-    const failed = historyEntryFromToolResult({ isError: true, content: [{ type: "text", text: "denied" }] }, "SELECT 1");
+    const failed = historyEntryFromToolResult(
+      { isError: true, content: [{ type: "text", text: "denied" }] },
+      { profile: "reporting", sql: "SELECT 1" },
+    );
     expect(failed.status).toBe("error");
     expect(failed.message).toBe("denied");
+    expect(failed.profile).toBe("reporting");
+
+    const unattributed = unattributedHistoryEntry("cancelled", [{ profile: "reporting", sql: "SELECT 1" }]);
+    expect(unattributed.profile).toBeNull();
+    expect(unattributed.candidates).toEqual([{ profile: "reporting", sql: "SELECT 1" }]);
   });
 
   it("evicts history beyond the view-local limit", () => {
     let history: HistoryEntry[] = [];
     for (let index = 0; index < MAX_HISTORY + 3; index += 1) {
-      history = addHistory(history, { id: String(index), status: "error", sql: "", message: "x", recordedAt: new Date(index).toISOString() });
+      history = addHistory(history, { id: String(index), status: "error", profile: "reporting", sql: "", message: "x", recordedAt: new Date(index).toISOString() });
     }
     expect(history).toHaveLength(MAX_HISTORY);
     expect(history[0]?.id).toBe(String(MAX_HISTORY + 2));

@@ -16,7 +16,6 @@ import (
 	"github.com/Kurok1/mcp-server-mysql/internal/audit"
 	"github.com/Kurok1/mcp-server-mysql/internal/config"
 	"github.com/Kurok1/mcp-server-mysql/internal/executor"
-	"github.com/Kurok1/mcp-server-mysql/internal/guard"
 )
 
 // startWriteStack 起真实 MySQL + 写开启的 server，返回已连接的 MCP client session。
@@ -44,7 +43,7 @@ func startWriteStack(t *testing.T) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 
-	cfg := &config.Config{
+	cfg := config.ProfileConfig{
 		MySQL: config.MySQLConfig{
 			Host: host, Port: int(port.Num()),
 			User: "root", Password: "test", Database: "myapp",
@@ -76,13 +75,13 @@ func startWriteStack(t *testing.T) *mcp.ClientSession {
 			t.Fatalf("seed: %v", err)
 		}
 	}
-	logger, err := audit.NewLogger(cfg.Audit)
+	logger, err := audit.NewLogger(testProfileName, cfg.Audit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { logger.Close() })
+	t.Cleanup(func() { _ = logger.Close() })
 
-	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), ex, logger)
+	srv := Build(config.ResourcesConfig{}, singleProfile(cfg, ex, logger))
 	ct, st := mcp.NewInMemoryTransports()
 	go func() { _ = srv.Run(ctx, st) }()
 

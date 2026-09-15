@@ -30,6 +30,7 @@ var resultSequence atomic.Uint64
 type QueryAppResult struct {
 	ResultID   string     `json:"resultId"`
 	Tool       string     `json:"tool"`
+	Profile    string     `json:"profile"`
 	Database   string     `json:"database"`
 	SQL        string     `json:"sql"`
 	Tables     []string   `json:"tables"`
@@ -77,12 +78,13 @@ func queryOutputSchema() map[string]any {
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{
-			"resultId", "tool", "database", "sql", "tables", "columns", "rows",
+			"resultId", "tool", "profile", "database", "sql", "tables", "columns", "rows",
 			"rowCount", "truncated", "durationMs", "executedAt",
 		},
 		"properties": map[string]any{
 			"resultId":   map[string]any{"type": "string"},
 			"tool":       map[string]any{"type": "string", "const": "mysql_query"},
+			"profile":    map[string]any{"type": "string"},
 			"database":   map[string]any{"type": "string"},
 			"sql":        map[string]any{"type": "string"},
 			"tables":     stringArray,
@@ -130,7 +132,7 @@ func nonNilSlice[T any](values []T) []T {
 }
 
 func queryAppResult(
-	text, database, sqlText string,
+	text, profileName, database, sqlText string,
 	tables []string,
 	result *executor.QueryResult,
 	durationMS int64,
@@ -141,6 +143,7 @@ func queryAppResult(
 		StructuredContent: QueryAppResult{
 			ResultID:   newResultID(),
 			Tool:       "mysql_query",
+			Profile:    profileName,
 			Database:   database,
 			SQL:        sqlText,
 			Tables:     nonNilSlice(tables),

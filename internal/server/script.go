@@ -18,7 +18,16 @@ import (
 )
 
 type ScriptIn struct {
-	Script string `json:"script" jsonschema:"The multi-statement script to run (;-separated); executes atomically in one transaction, DDL banned"`
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
+	Script  string `json:"script" jsonschema:"The multi-statement script to run (;-separated); executes atomically in one transaction, DDL banned"`
+}
+
+func (h *toolHandlers) handleScript(ctx context.Context, req *mcp.CallToolRequest, in ScriptIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.handleScript(ctx, req, in)
 }
 
 // trimStmt 去掉单条语句的首尾空白与尾分号，保证驱动层每次只收到一条纯语句。

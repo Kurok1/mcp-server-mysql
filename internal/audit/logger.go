@@ -20,21 +20,27 @@ import (
 // enabled 为 false 时只维护环形缓冲（供 mysql_stats），不落盘、不建目录。
 type Logger struct {
 	mu            sync.Mutex
+	profile       string
 	enabled       bool
 	dir           string
 	slowThreshold time.Duration
 	ring          *ring
 	curDate       string
 	f             *os.File
+	closed        bool
 }
 
-func NewLogger(cfg config.AuditConfig) (*Logger, error) {
+func NewLogger(profileName string, cfg config.AuditConfig) (*Logger, error) {
+	if err := config.ValidateProfileName(profileName); err != nil {
+		return nil, fmt.Errorf("invalid audit profile: %w", err)
+	}
 	if cfg.Enabled {
 		if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
 			return nil, fmt.Errorf("create audit log directory: %w", err)
 		}
 	}
 	return &Logger{
+		profile:       profileName,
 		enabled:       cfg.Enabled,
 		dir:           cfg.LogDir,
 		slowThreshold: time.Duration(cfg.SlowQueryThreshold),
@@ -47,6 +53,9 @@ func (l *Logger) Dir() string { return l.dir }
 // Log 补齐 Slow 标记后写 JSONL 并推入环形缓冲。写盘失败不阻断请求，
 // 降级为 stderr 告警（审计尽力而为，但不能反过来打挂服务）。
 func (l *Logger) Log(rec Record) {
+	// Profile identity belongs to the logger, rather than callers, so denied
+	// and script records cannot accidentally be attributed to another profile.
+	rec.Profile = l.profile
 	if rec.Decision == "allowed" && time.Duration(rec.DurationMS)*time.Millisecond >= l.slowThreshold {
 		rec.Slow = true
 	}
@@ -59,12 +68,15 @@ func (l *Logger) Log(rec Record) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
 	date := rec.Timestamp.Format("2006-01-02")
 	if date != l.curDate {
 		if l.f != nil {
 			l.f.Close()
 		}
-		f, err := os.OpenFile(filepath.Join(l.dir, "audit-"+date+".jsonl"),
+		f, err := os.OpenFile(filepath.Join(l.dir, "audit-"+l.profile+"-"+date+".jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "audit: failed to open log file: %v\n", err)
@@ -83,17 +95,24 @@ func (l *Logger) Log(rec Record) {
 	}
 }
 
-func (l *Logger) Close() {
+func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.f != nil {
-		l.f.Close()
-		l.f = nil
+	if l.closed {
+		return nil
 	}
+	l.closed = true
+	if l.f != nil {
+		err := l.f.Close()
+		l.f = nil
+		return err
+	}
+	return nil
 }
 
 // Stats 基于环形缓冲计算本会话统计。
 type Stats struct {
+	Profile      string         `json:"profile"`
 	Total        int            `json:"total"`
 	Denied       int            `json:"denied"`
 	AvgMS        float64        `json:"avg_ms"`
@@ -112,6 +131,7 @@ type SlowQuery struct {
 func (l *Logger) Stats(topN int) Stats {
 	recs := l.ring.snapshot()
 	s := Stats{
+		Profile:      l.profile,
 		TableCounts:  map[string]int{},
 		DeniedByRule: map[string]int{},
 	}

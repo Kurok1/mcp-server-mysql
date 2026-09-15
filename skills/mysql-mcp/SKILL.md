@@ -1,19 +1,20 @@
 ---
 name: mysql-mcp
-description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / mysql_execute / mysql_script / mysql_explain / mysql_list_tables / mysql_describe_table / mysql_stats）安全地查询和操作 MySQL 数据库。前置条件：仅当会话工具列表中实际存在这些 mysql_* 工具（即用户已连接 mcp-server-mysql）时才使用本 skill；工具不存在时不要触发，按常规方式处理数据库任务即可。工具存在时，只要任务涉及 MySQL——查数据、看表结构、跑 SQL、批量修数、分析慢查询或执行计划、解读 DENIED 拒绝信息——就使用本 skill，即使用户没有提到"MCP"或具体工具名，例如"帮我查一下数据库"、"这张表有什么字段"、"这条 SQL 为什么慢"。
+description: 使用已连接的 mcp-server-mysql 的 list_profile 与 mysql_* 工具查询和操作 MySQL。仅当这些工具实际出现在会话工具列表中时适用；用于选择数据库连接、查数据、看表结构、执行单条 SQL 或事务脚本、分析慢查询和执行计划、解读 DENIED 拒绝信息。
 ---
 
 # 使用 mcp-server-mysql 查询与操作 MySQL
 
 ## 前置检查
 
-本 skill 只适用于**已连接 mcp-server-mysql** 的会话。动手前先确认当前工具列表里确实存在 `mysql_query` 等 `mysql_*` 工具（客户端里通常带 `mcp__<server名>__` 前缀，按后缀识别）。如果没有这些工具：本 skill 不适用，不要凭本文档虚构调用它们——按常规方式完成数据库任务（如本地 mysql CLI），或建议用户按仓库 README 配置连接本 MCP 后再来。
+本 skill 只适用于**已连接 mcp-server-mysql** 的会话。动手前先确认当前工具列表里确实存在 `list_profile` 和 `mysql_query` 等工具（客户端里通常带 `mcp__<server名>__` 前缀，按后缀识别）。工具不存在时按常规方式完成数据库任务，或引导用户按仓库 README 配置连接。
 
 这个 MCP server 是安全优先设计：每条 SQL 先过工业级 AST 解析校验（解析失败一律拒绝），读语句包在只读事务里执行，驱动层禁多语句。理解它的边界，你就能高效使用它；试图绕过只会浪费轮次。
 
 ## 心智模型
 
-- **默认只读、白名单默认全拒**。能执行什么语句类型（`allowed_statements`）、能碰哪些表（`table_whitelist`）完全由服务端配置决定，会话内无法更改。
+- **一次操作绑定一个 profile**。profile 是服务端配置的独立连接，拥有自己的默认库、连接池、安全规则、审计及统计。所有 `mysql_*` 工具都必填 `profile`；`list_profile` 无参数，返回按名称排序的 `{profiles: [{name, description}]}`，只描述配置，不代表连接健康检查通过。
+- **默认只读、白名单默认全拒**。能执行什么语句类型（`allowed_statements`）、能碰哪些表（`table_whitelist`）由所选 profile 的服务端配置决定，会话内无法更改。
 - **DENIED 是边界，不是故障**。收到 `DENIED [规则名]: 原因` 时，按下文对照表调整做法；同一条语句换个写法重试大概率还是拒（校验基于语义解析，注释、大小写、版本化注释 `/*!...*/` 都藏不住东西）。
 - **fail-closed**。极个别 MySQL 边缘语法解析器不认时也会被拒（`parse_error`），这时换等价写法，而不是反复重试原句。
 - 需要放宽边界（加白名单、开写权限、调行数上限）时，如实告诉用户去改服务端 `config.yaml` 并重启 MCP，不要在 SQL 层想办法。
@@ -22,13 +23,14 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 | 任务 | 工具 |
 |---|---|
+| 发现可用连接名称与用途 | `list_profile` |
 | 单条读查询（SELECT / SHOW / DESCRIBE / EXPLAIN） | `mysql_query` |
 | 单条写语句（INSERT / UPDATE / DELETE / DDL，需服务端开启） | `mysql_execute` |
 | 多条语句原子执行（全成或全回滚） | `mysql_script` |
 | 看有哪些表可用 | `mysql_list_tables` |
 | 看某张表的列结构 | `mysql_describe_table` |
 | 分析单条 SELECT 的执行计划 | `mysql_explain` |
-| 本会话执行统计（哪条最慢、拒了几条） | `mysql_stats` |
+| 指定 profile 的执行统计（哪条最慢、拒了几条） | `mysql_stats` |
 
 ## 硬规则（违反必被拒）
 
@@ -42,9 +44,19 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ## 推荐工作流
 
+### 确定目标 profile
+
+1. 以 `{}` 调用 `list_profile`，读取可用名称与描述。
+2. 将用户的目标环境或用途匹配到明确的 profile；若多个条目都符合且上下文无法区分，请用户选择。得到唯一目标后再访问数据库。
+3. 在查看、执行和验证阶段始终显式携带该名称。例如 `mysql_query({"profile":"dev","sql":"SELECT * FROM myapp.orders LIMIT 10"})`。
+
+缺失、空值或未知 profile 会被拒绝，没有隐式默认连接。名称不匹配时重新核对 `list_profile`；连接失败或安全规则拒绝时，保留原目标并解释原因，不能自动切换到另一个环境重试。
+
 ### 探索陌生库
 
-先 `mysql_list_tables`（只显示白名单内的表，这就是你的全部可用面），再对目标表 `mysql_describe_table`，然后小步查询。不要跳过这两步直接猜表名——猜错的每一次都是 `table_whitelist` 拒绝。
+在确定的 profile 下先调用 `mysql_list_tables({"profile":"dev"})`，再对目标表调用 `mysql_describe_table({"profile":"dev","table":"orders"})`，然后小步查询。省略 `database` 时使用该 profile 的默认库。表列表只显示该连接中白名单允许的基础表；不同 profile 即使库表同名，也视为不同目标。
+
+表结构 Resource URI 为 `mysql:///schema/{profile}/{database}/{table}`，读取时同样核对 profile。全局 `resources.enabled: false` 会关闭表资源和查询结果 App，工具仍可使用。
 
 ### 读查询
 
@@ -58,7 +70,7 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ### 批量修数（mysql_script）
 
-多条写语句需要原子性时用 `mysql_script`：整段脚本在单个事务里逐条执行，任一条失败全部回滚。
+多条写语句需要原子性时用 `mysql_script`，传入 `profile` 和 `script`：整段脚本在所选连接的单个事务里逐条执行，任一条失败全部回滚。一个脚本不能跨 profile；同一连接内经白名单允许的跨库访问仍使用 `库名.表名`。
 
 - 输入是一个 `;` 分隔的脚本字符串，条数有上限（默认 50）。
 - 执行前每一条都要先过安全校验，**任何一条不过则整段拒绝、一条都不执行**——被拒时会指出第几条、什么原因，修好那条再整段重发。
@@ -67,7 +79,7 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ### 执行计划分析（mysql_explain）
 
-只接受单条 SELECT。参数：`sql`、`format`、`analyze`。
+只接受单条 SELECT。参数：`profile`、`sql`、`format`、`analyze`。
 
 | 需求 | 用法 |
 |---|---|
@@ -80,7 +92,7 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ### 性能回顾（mysql_stats）
 
-用户问"刚才哪条 SQL 最慢"、"这个会话跑了多少查询"时用它：返回总数 / 拒绝数、平均与 P95 耗时、慢查询 Top N（`top_n` 参数，默认 5）、按表访问计数。统计仅限本会话（进程重启归零）。
+用户问"刚才哪条 SQL 最慢"、"跑了多少查询"时，以例如 `{"profile":"dev","top_n":5}` 调用：返回 profile 名称、总数 / 拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数。统计来自该 profile 独立的环形缓冲窗口，由当前进程使用同一 profile 的调用方共享，重启归零。`audit.enabled` 仅控制落盘，不影响统计。
 
 ## DENIED 对照表
 
@@ -102,15 +114,16 @@ description: 通过 mcp-server-mysql 提供的 mysql_* 工具（mysql_query / my
 
 ## 结果解读
 
+- `mysql_query` 的结构化结果包含 `profile`；核对来源再解释数据。结果 App 的历史保留来源，刷新使用所选历史原始的 `{profile, sql}`。若重叠请求的错误或取消通知标为“来源未确定”，只能说明通知与候选输入，不能断言某个 profile 的请求已失败或取消。
 - 读结果超过行数上限会截断并标注——看到截断标记时，告诉用户结果不完整，改用聚合或分页。
 - 写结果返回 `OK, N rows affected`——核对 N 是否符合预期。
 - 脚本结果逐条编号，末尾是 `COMMIT (all N statements succeeded)` 或 `statement k failed: …; ROLLBACK executed`——ROLLBACK 意味着**所有**写入都没有生效，包括失败之前的条目。
-- 服务端可能开启了审计日志：所有请求（含被拒的）可能被永久记录，SQL 原文都在其中。
+- 服务端可能开启了审计日志：进入审计流程的 SQL（含被守卫拒绝的）会记录原文和 `profile`，按 `audit-<profile>-<YYYY-MM-DD>.jsonl` 分文件存储。
 
 ## 服务端配置边界
 
-以下都是服务端 `config.yaml` 决定的，会话内不可变，需要调整时引导用户修改并重启 MCP：
+以下由服务端 `config.yaml` 的 `profiles.<name>.security` 决定，会话内不可变，需要调整时定位到目标 profile 并重启 MCP：
 
 `allowed_statements`（语句类型开关，默认仅 select）、`table_whitelist`（库表白名单，支持 `db.*` 通配）、`max_rows`（行数上限，默认 1000）、`query_timeout`（默认 30s）、`block_unfiltered_writes`（默认开）、`max_script_statements`（默认 50）。
 
-完整配置说明见仓库的 `config.example.yaml` 与 README。
+完整配置示例见 [config.example.yaml](../../config.example.yaml)。升级旧版单连接配置时，参见 [配置迁移说明](../../README.zh-CN.md#从单连接配置迁移)：将 `mysql`、`security`、`audit` 移入命名 profile，`resources` 保持顶层，并为工具调用补上 `profile`。

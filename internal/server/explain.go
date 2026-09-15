@@ -15,9 +15,18 @@ import (
 )
 
 type ExplainIn struct {
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
 	SQL     string `json:"sql" jsonschema:"The single SELECT query to explain"`
 	Format  string `json:"format,omitempty" jsonschema:"Output format: traditional (default) / json / tree"`
 	Analyze bool   `json:"analyze,omitempty" jsonschema:"If true, run EXPLAIN ANALYZE (actually executes the query; SELECT only)"`
+}
+
+func (h *toolHandlers) handleExplain(ctx context.Context, req *mcp.CallToolRequest, in ExplainIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.handleExplain(ctx, req, in)
 }
 
 func (d *deps) handleExplain(ctx context.Context, req *mcp.CallToolRequest, in ExplainIn) (*mcp.CallToolResult, any, error) {

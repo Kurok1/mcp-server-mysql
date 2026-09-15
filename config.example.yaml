@@ -1,29 +1,58 @@
-# @author Kurok1 <im.kurokyhanc@gmail.com>
-# @since 0.1.0
-mysql:
-  host: 127.0.0.1          # Docker 内连宿主机改用 host.docker.internal
-  port: 3306
-  user: mcp_dev            # 建议专用最小权限账号，勿用 root
-  password: ${MYSQL_MCP_PASSWORD}
-  database: myapp
-  pool:
-    max_open: 5
-    max_idle: 2
+# Profiles are isolated: each has its own MySQL pool, SQL safety rules, and
+# audit ring/log stream. There is no inherited or implicit default profile.
+profiles:
+  analytics:
+    description: Read-only analytics replica
+    mysql:
+      host: 127.0.0.1          # Docker: use host.docker.internal for the host
+      port: 3306
+      user: mcp_analytics      # Use a dedicated least-privilege account
+      password: ${ANALYTICS_MYSQL_PASSWORD}
+      database: analytics
+      pool:
+        max_open: 5
+        max_idle: 2
+    security:
+      allowed_statements: [select]
+      table_whitelist:
+        - "analytics.*"
+      max_rows: 1000
+      query_timeout: 30s
+      block_unfiltered_writes: true
+      max_script_statements: 50
+    audit:
+      enabled: false           # mysql_stats still works while JSONL is disabled
+      log_dir: ~/.mcp-server-mysql/logs
+      slow_query_threshold: 1s
+      ring_buffer_size: 1000
 
-security:
-  allowed_statements: [select]   # select/insert/update/delete/ddl，默认只读
-  table_whitelist:               # 默认拒绝一切，按需放行
-    - "myapp.*"
-  max_rows: 1000
-  query_timeout: 30s
-  block_unfiltered_writes: true
-  max_script_statements: 50      # 单个 mysql_script 脚本的语句条数上限
+  app_writer:
+    description: Application database for reviewed maintenance writes
+    mysql:
+      host: 127.0.0.1
+      port: 3306
+      user: mcp_writer
+      password: ${APP_WRITER_MYSQL_PASSWORD}
+      database: myapp
+      pool:
+        max_open: 3
+        max_idle: 1
+    security:
+      allowed_statements: [select, insert, update]
+      table_whitelist:
+        - "myapp.orders"
+        - "myapp.order_notes"
+      max_rows: 500
+      query_timeout: 15s
+      block_unfiltered_writes: true
+      max_script_statements: 10
+    audit:
+      enabled: true
+      # Shared directories are safe: files are audit-<profile>-<date>.jsonl.
+      log_dir: ~/.mcp-server-mysql/logs
+      slow_query_threshold: 500ms
+      ring_buffer_size: 500
 
+# Resources are global. Set false to skip table discovery and the MCP App.
 resources:
-  enabled: true                  # 默认 true；false 时不注册表结构 Resources 或 MCP App，并跳过初始化表发现
-
-audit:
-  enabled: false                      # 默认 false 不落盘 JSONL 审计日志；设 true 才写盘（会话内 mysql_stats 不受影响，始终可用）
-  log_dir: ~/.mcp-server-mysql/logs   # Docker 运行时务必指向挂载卷，如 /data/logs
-  slow_query_threshold: 1s
-  ring_buffer_size: 1000
+  enabled: true
