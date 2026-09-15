@@ -7,10 +7,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 
@@ -140,6 +142,45 @@ func startMetadataSession(t *testing.T) *mcp.ClientSession {
 	return session
 }
 
+func startDisabledMetadataSession(t *testing.T, legacy bool) *mcp.ClientSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	disabled := false
+	cfg := &config.Config{
+		MySQL: config.MySQLConfig{Database: "myapp"},
+		Security: config.SecurityConfig{
+			AllowedStatements: []string{"select"},
+			TableWhitelist:    []string{"myapp.*"},
+		},
+		Resources: config.ResourcesConfig{Enabled: &disabled},
+	}
+	// A nil executor makes any unexpected discovery call fail immediately instead
+	// of relying on an unreachable database or timing-sensitive assertions.
+	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), nil, nil)
+	if legacy {
+		// Force the SDK client's documented fallback so it sends the legacy
+		// initialize request followed by notifications/initialized.
+		srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				if method == "server/discover" {
+					return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not found"}
+				}
+				return next(ctx, method, req)
+			}
+		})
+	}
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go func() { _ = srv.Run(ctx, serverTransport) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "disabled-metadata-test", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
 func TestQueryAppRegistration(t *testing.T) {
 	session := startMetadataSession(t)
 	initResult := session.InitializeResult()
@@ -212,6 +253,69 @@ func TestQueryAppRegistration(t *testing.T) {
 	}
 	if _, ok := permissions["clipboardWrite"]; !ok {
 		t.Fatalf("clipboard permission missing: %#v", permissions)
+	}
+}
+
+func TestResourcesDisabledDoesNotRegisterResourcesOrDiscoverMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		legacy       bool
+		wantProtocol string
+	}{
+		{name: "modern server discover", wantProtocol: "2026-07-28"},
+		{name: "legacy initialize and initialized", legacy: true, wantProtocol: "2025-11-25"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := startDisabledMetadataSession(t, tc.legacy)
+			initResult := session.InitializeResult()
+			if initResult == nil || initResult.Capabilities == nil {
+				t.Fatal("missing server capabilities")
+			}
+			if initResult.ProtocolVersion != tc.wantProtocol {
+				t.Fatalf("protocol version = %q, want %q", initResult.ProtocolVersion, tc.wantProtocol)
+			}
+			if initResult.Capabilities.Logging == nil {
+				t.Fatal("logging capability was removed")
+			}
+			if initResult.Capabilities.Resources != nil {
+				t.Fatalf("resources capability = %#v, want absent", initResult.Capabilities.Resources)
+			}
+			if _, ok := initResult.Capabilities.Extensions[uiExtensionID]; ok {
+				t.Fatalf("unexpected %s extension: %#v", uiExtensionID, initResult.Capabilities.Extensions)
+			}
+
+			tools, err := session.ListTools(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("ListTools: %v", err)
+			}
+			if len(tools.Tools) != 7 {
+				t.Fatalf("tool count = %d, want 7", len(tools.Tools))
+			}
+			for _, tool := range tools.Tools {
+				if tool.Name != "mysql_query" {
+					continue
+				}
+				if len(tool.Meta) != 0 {
+					t.Fatalf("mysql_query metadata = %#v, want no UI metadata", tool.Meta)
+				}
+				if tool.OutputSchema == nil {
+					t.Fatal("mysql_query output schema was removed")
+				}
+			}
+
+			resources, err := session.ListResources(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("ListResources: %v", err)
+			}
+			if len(resources.Resources) != 0 {
+				t.Fatalf("resources = %#v, want none", resources.Resources)
+			}
+			_, err = session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: queryResultsResourceURI})
+			var rpcErr *jsonrpc.Error
+			if !errors.As(err, &rpcErr) || rpcErr.Code != mcp.CodeResourceNotFound {
+				t.Fatalf("ReadResource(query app) error = %v, want resource not found", err)
+			}
+		})
 	}
 }
 
@@ -381,4 +485,58 @@ func TestE2E(t *testing.T) {
 			t.Errorf("expected 2 denied in stats, got:\n%s", text)
 		}
 	})
+}
+
+func TestE2EResourcesDisabledKeepsToolsUsable(t *testing.T) {
+	stack := startStack(t)
+	cfg := *stack.cfg
+	cfg.Resources = config.ResourcesConfig{}
+	disabled := false
+	cfg.Resources.Enabled = &disabled
+
+	srv := Build(&cfg, guard.New(cfg.Security, cfg.MySQL.Database), stack.ex, stack.logger)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Run(ctx, serverTransport) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-resources-disabled", Version: "0"}, nil)
+	sess, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if init := sess.InitializeResult(); init == nil || init.Capabilities == nil || init.Capabilities.Resources != nil {
+		t.Fatalf("disabled server resources capability = %#v, want absent", init)
+	}
+	resources, err := sess.ListResources(ctx, nil)
+	if err != nil || len(resources.Resources) != 0 {
+		t.Fatalf("disabled server resources = %#v, err = %v", resources, err)
+	}
+	if text, isErr := callText(t, sess, "mysql_list_tables", map[string]any{}); isErr || !strings.Contains(text, "myapp.t1") {
+		t.Fatalf("mysql_list_tables after disabling resources: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callText(t, sess, "mysql_describe_table", map[string]any{"table": "t1"}); isErr || !strings.Contains(text, "id") {
+		t.Fatalf("mysql_describe_table after disabling resources: isErr=%v text=%s", isErr, text)
+	}
+	query, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "mysql_query", Arguments: map[string]any{"sql": "SELECT name FROM t1 ORDER BY id"},
+	})
+	if err != nil {
+		t.Fatalf("mysql_query after disabling resources: %v", err)
+	}
+	if query.IsError || len(query.Content) == 0 || !strings.Contains(query.Content[0].(*mcp.TextContent).Text, "alice") {
+		t.Fatalf("mysql_query text result after disabling resources = %#v", query)
+	}
+	encoded, err := json.Marshal(query.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal mysql_query structured content: %v", err)
+	}
+	var payload QueryAppResult
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal mysql_query structured content: %v", err)
+	}
+	if payload.RowCount != 2 || len(payload.Rows) != 2 || payload.Rows[0][0] != "alice" {
+		t.Fatalf("mysql_query structured result after disabling resources = %+v", payload)
+	}
 }

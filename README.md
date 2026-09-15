@@ -55,6 +55,8 @@ The server takes one table snapshot when the MCP connection is initialized and r
 
 The resource **set** is a connection-time snapshot: a table created later appears after reconnecting, while a dropped or newly inaccessible table returns MCP Resource Not Found. The resource **content** is live, so `ALTER TABLE` is reflected on the next read. Resource discovery and reads do not enter the audit log or `mysql_stats`; initialization failures are written to stderr and leave an empty resource list without disabling the tools.
 
+Set `resources.enabled: false` to disable the entire resource feature. It defaults to `true`; when disabled, the server does not advertise Resources, register table or MCP App resources, or query MySQL during initialization/discovery. The interactive MCP App is therefore unavailable, while all seven tools, including `mysql_query`'s text and structured results, remain available.
+
 ## Quick start
 
 ### 1. Get the binary
@@ -261,6 +263,7 @@ And it **fails closed at startup**: an unreadable file, an unknown/misspelled ke
 | `security.query_timeout` | `30s` | Per-query context timeout |
 | `security.block_unfiltered_writes` | `true` | Deny `UPDATE`/`DELETE` without `WHERE` |
 | `security.max_script_statements` | `50` | Statement cap per `mysql_script` call |
+| `resources.enabled` | `true` | Set `false` to omit table/UI resources and skip initialization/discovery metadata queries |
 | `audit.enabled` | `false` | JSONL disk logging; in-memory session stats work regardless |
 | `audit.log_dir` | `~/.mcp-server-mysql/logs` | Must be a mounted volume under Docker |
 | `audit.slow_query_threshold` | `1s` | Queries above this are flagged slow |

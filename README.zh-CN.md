@@ -55,6 +55,8 @@
 
 Resource **集合**是连接时快照：之后新建的表需重连才会出现；已删除或新近失权的表会在读取时返回 MCP Resource Not Found。Resource **内容**则实时读取，因此 `ALTER TABLE` 会在下次读取时体现。Resource discovery/read 不进入审计日志或 `mysql_stats`；初始化查库失败只写 stderr，Resource 列表为空，但 Tools 仍可使用。
 
+将 `resources.enabled` 设为 `false` 可关闭整个 Resource 功能。它默认是 `true`；关闭后服务端不会声明 Resources、注册表或 MCP App Resource，也不会在初始化/discovery 时查询 MySQL。交互式 MCP App 因而不可用，但全部 7 个工具仍可使用，`mysql_query` 的文本和结构化结果也保持不变。
+
 ## 快速开始
 
 ### 1. 获取二进制
@@ -261,6 +263,7 @@ MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
 | `security.query_timeout` | `30s` | 单查询超时 |
 | `security.block_unfiltered_writes` | `true` | 拦截无 `WHERE` 的 `UPDATE`/`DELETE` |
 | `security.max_script_statements` | `50` | 单个 `mysql_script` 的语句条数上限 |
+| `resources.enabled` | `true` | 设为 `false` 时不注册表/UI Resource，并跳过初始化/discovery 元数据查询 |
 | `audit.enabled` | `false` | JSONL 落盘开关；会话内统计不受影响，始终可用 |
 | `audit.log_dir` | `~/.mcp-server-mysql/logs` | Docker 运行时务必指向挂载卷 |
 | `audit.slow_query_threshold` | `1s` | 超过即标记为慢查询 |

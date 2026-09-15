@@ -65,10 +65,23 @@ type AuditConfig struct {
 	RingBufferSize     int      `yaml:"ring_buffer_size"`
 }
 
+type ResourcesConfig struct {
+	// Enabled is nil when omitted (including YAML null), which keeps resources enabled.
+	Enabled *bool `yaml:"enabled"`
+}
+
+// IsEnabled reports whether MCP resources should be registered. Its zero value
+// intentionally enables resources so Config values built directly in Go retain
+// the same behavior as an omitted YAML setting.
+func (c ResourcesConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 type Config struct {
-	MySQL    MySQLConfig    `yaml:"mysql"`
-	Security SecurityConfig `yaml:"security"`
-	Audit    AuditConfig    `yaml:"audit"`
+	MySQL     MySQLConfig     `yaml:"mysql"`
+	Security  SecurityConfig  `yaml:"security"`
+	Resources ResourcesConfig `yaml:"resources"`
+	Audit     AuditConfig     `yaml:"audit"`
 }
 
 var validStatements = map[string]bool{
