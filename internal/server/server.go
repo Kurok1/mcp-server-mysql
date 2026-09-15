@@ -82,7 +82,7 @@ func Build(resourcesCfg config.ResourcesConfig, profiles ProfileProvider) *mcp.S
 			resources.load(ctx, s)
 		}
 	}
-	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.0.1"}, opts)
+	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.1.0"}, opts)
 	if resourcesEnabled {
 		s.AddReceivingMiddleware(resources.discoveryMiddleware(s))
 	}
