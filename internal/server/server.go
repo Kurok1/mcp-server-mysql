@@ -58,24 +58,32 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 		maxRows:        cfg.Security.MaxRows,
 		maxScriptStmts: cfg.Security.MaxScriptStatements,
 	}
-	resources := &tableResourceRegistry{}
+	resourcesEnabled := cfg.Resources.IsEnabled()
 	var s *mcp.Server
-	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.0.0"}, &mcp.ServerOptions{
-		Capabilities: queryAppCapabilities(),
-		InitializedHandler: func(ctx context.Context, _ *mcp.InitializedRequest) {
+	opts := &mcp.ServerOptions{Capabilities: queryAppCapabilities(resourcesEnabled)}
+	var resources *tableResourceRegistry
+	if resourcesEnabled {
+		resources = &tableResourceRegistry{}
+		opts.InitializedHandler = func(ctx context.Context, _ *mcp.InitializedRequest) {
 			resources.load(ctx, s, d)
-		},
-	})
-	s.AddReceivingMiddleware(resources.discoveryMiddleware(s, d))
+		}
+	}
+	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.0.1"}, opts)
+	if resourcesEnabled {
+		s.AddReceivingMiddleware(resources.discoveryMiddleware(s, d))
+	}
 
 	truePtr := true
-	mcp.AddTool(s, &mcp.Tool{
-		Meta:         queryToolMeta(),
+	queryTool := &mcp.Tool{
 		Name:         "mysql_query",
 		Description:  "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN). Subject to the table whitelist, row cap and query timeout.",
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
 		OutputSchema: queryOutputSchema(),
-	}, d.handleQuery)
+	}
+	if resourcesEnabled {
+		queryTool.Meta = queryToolMeta()
+	}
+	mcp.AddTool(s, queryTool, d.handleQuery)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_execute",
 		Description: "Run a single write statement (INSERT/UPDATE/DELETE/DDL types enabled in config); returns affected rows. The default config denies all writes.",
@@ -106,7 +114,9 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 		Description: "Return the execution plan for a single SELECT. format: traditional (default) / json / tree; analyze=true runs EXPLAIN ANALYZE (actually executes the query and returns real timing/rows).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, d.handleExplain)
-	registerQueryAppResource(s)
+	if resourcesEnabled {
+		registerQueryAppResource(s)
+	}
 	return s
 }
 

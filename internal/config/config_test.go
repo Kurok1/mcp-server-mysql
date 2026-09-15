@@ -185,3 +185,57 @@ audit:
 		t.Error("audit.enabled: true should be parsed as true")
 	}
 }
+
+func TestResourcesEnabled(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "omitted defaults to enabled",
+			yaml: "mysql: {user: u, password: p, database: d}\n",
+			want: true,
+		},
+		{
+			name: "explicit true",
+			yaml: "mysql: {user: u, password: p, database: d}\nresources: {enabled: true}\n",
+			want: true,
+		},
+		{
+			name: "explicit false",
+			yaml: "mysql: {user: u, password: p, database: d}\nresources: {enabled: false}\n",
+			want: false,
+		},
+		{
+			name: "null is unset",
+			yaml: "mysql: {user: u, password: p, database: d}\nresources: {enabled: null}\n",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeTemp(t, tc.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Resources.IsEnabled(); got != tc.want {
+				t.Errorf("resources enabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if !(&Config{}).Resources.IsEnabled() {
+		t.Error("zero-value Config must enable resources")
+	}
+}
+
+func TestResourcesEnabledRejectsInvalidValues(t *testing.T) {
+	for _, yaml := range []string{
+		"mysql: {user: u, password: p, database: d}\nresources: {enabled: sometimes}\n",
+		"mysql: {user: u, password: p, database: d}\nresources: {unknown: true}\n",
+	} {
+		if _, err := Load(writeTemp(t, yaml)); err == nil {
+			t.Errorf("Load(%q) succeeded, want an error", yaml)
+		}
+	}
+}

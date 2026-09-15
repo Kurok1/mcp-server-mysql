@@ -41,11 +41,12 @@ type QueryAppResult struct {
 	ExecutedAt string     `json:"executedAt"`
 }
 
-func queryAppCapabilities() *mcp.ServerCapabilities {
-	caps := &mcp.ServerCapabilities{
-		Logging:   &mcp.LoggingCapabilities{},
-		Resources: &mcp.ResourceCapabilities{ListChanged: true},
+func queryAppCapabilities(resourcesEnabled bool) *mcp.ServerCapabilities {
+	caps := &mcp.ServerCapabilities{Logging: &mcp.LoggingCapabilities{}}
+	if !resourcesEnabled {
+		return caps
 	}
+	caps.Resources = &mcp.ResourceCapabilities{ListChanged: true}
 	caps.AddExtension(uiExtensionID, nil)
 	return caps
 }
