@@ -78,10 +78,17 @@ func (c ResourcesConfig) IsEnabled() bool {
 }
 
 type Config struct {
-	MySQL     MySQLConfig     `yaml:"mysql"`
-	Security  SecurityConfig  `yaml:"security"`
-	Resources ResourcesConfig `yaml:"resources"`
-	Audit     AuditConfig     `yaml:"audit"`
+	Profiles  map[string]ProfileConfig `yaml:"profiles"`
+	Resources ResourcesConfig          `yaml:"resources"`
+}
+
+// ProfileConfig groups the independently configured connection, guard, and
+// audit settings for one named database profile.
+type ProfileConfig struct {
+	Description string         `yaml:"description"`
+	MySQL       MySQLConfig    `yaml:"mysql"`
+	Security    SecurityConfig `yaml:"security"`
+	Audit       AuditConfig    `yaml:"audit"`
 }
 
 var validStatements = map[string]bool{
@@ -90,6 +97,7 @@ var validStatements = map[string]bool{
 
 // 白名单模式：db 部分.table 部分，各自允许字母数字下划线 $ 和通配符 *。
 var whitelistPattern = regexp.MustCompile(`^[\w$*]+\.[\w$*]+$`)
+var profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
@@ -105,74 +113,107 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config file: %w", err)
 	}
-	cfg.applyDefaults()
-	if err := cfg.validate(); err != nil {
+	if err := cfg.NormalizeAndValidate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-func (c *Config) applyDefaults() {
-	if c.MySQL.Host == "" {
-		c.MySQL.Host = "127.0.0.1"
+// NormalizeAndValidate applies the safe defaults and validates every profile.
+// It is exported so callers that construct Config values directly get the same
+// guarantees as YAML-loaded configurations.
+func (c *Config) NormalizeAndValidate() error {
+	if len(c.Profiles) == 0 {
+		return fmt.Errorf("profiles must contain at least one profile")
 	}
-	if c.MySQL.Port == 0 {
-		c.MySQL.Port = 3306
-	}
-	if c.MySQL.Pool.MaxOpen == 0 {
-		c.MySQL.Pool.MaxOpen = 5
-	}
-	if c.MySQL.Pool.MaxIdle == 0 {
-		c.MySQL.Pool.MaxIdle = 2
-	}
-	if len(c.Security.AllowedStatements) == 0 {
-		c.Security.AllowedStatements = []string{"select"}
-	}
-	if c.Security.MaxRows == 0 {
-		c.Security.MaxRows = 1000
-	}
-	if c.Security.QueryTimeout == 0 {
-		c.Security.QueryTimeout = Duration(30 * time.Second)
-	}
-	if c.Security.MaxScriptStatements == 0 {
-		c.Security.MaxScriptStatements = 50
-	}
-	if c.Audit.LogDir == "" {
-		home, _ := os.UserHomeDir()
-		c.Audit.LogDir = filepath.Join(home, ".mcp-server-mysql", "logs")
-	}
-	if c.Audit.SlowQueryThreshold == 0 {
-		c.Audit.SlowQueryThreshold = Duration(time.Second)
-	}
-	if c.Audit.RingBufferSize == 0 {
-		c.Audit.RingBufferSize = 1000
-	}
-	if strings.HasPrefix(c.Audit.LogDir, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			c.Audit.LogDir = filepath.Join(home, c.Audit.LogDir[2:])
+	for name, profile := range c.Profiles {
+		if err := ValidateProfileName(name); err != nil {
+			return err
 		}
+		if err := NormalizeAndValidateProfile(&profile); err != nil {
+			return fmt.Errorf("profile %q: %w", name, err)
+		}
+		c.Profiles[name] = profile
 	}
+	return nil
 }
 
-func (c *Config) validate() error {
-	if c.MySQL.User == "" {
+// ValidateProfileName keeps profile names safe for lookup, logging, and audit
+// file names. It deliberately accepts only a small, portable character set.
+func ValidateProfileName(name string) error {
+	if !profileNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q (expected ^[a-z0-9][a-z0-9_-]*$)", name)
+	}
+	return nil
+}
+
+// NormalizeAndValidateProfile applies defaults and validates one profile.
+// Manager construction uses it too, so direct Go construction is safe.
+func NormalizeAndValidateProfile(p *ProfileConfig) error {
+	if p.MySQL.Host == "" {
+		p.MySQL.Host = "127.0.0.1"
+	}
+	if p.MySQL.Port == 0 {
+		p.MySQL.Port = 3306
+	}
+	if p.MySQL.Pool.MaxOpen == 0 {
+		p.MySQL.Pool.MaxOpen = 5
+	}
+	if p.MySQL.Pool.MaxIdle == 0 {
+		p.MySQL.Pool.MaxIdle = 2
+	}
+	if len(p.Security.AllowedStatements) == 0 {
+		p.Security.AllowedStatements = []string{"select"}
+	}
+	if p.Security.MaxRows == 0 {
+		p.Security.MaxRows = 1000
+	}
+	if p.Security.QueryTimeout == 0 {
+		p.Security.QueryTimeout = Duration(30 * time.Second)
+	}
+	if p.Security.MaxScriptStatements == 0 {
+		p.Security.MaxScriptStatements = 50
+	}
+	if p.Audit.LogDir == "" {
+		home, _ := os.UserHomeDir()
+		p.Audit.LogDir = filepath.Join(home, ".mcp-server-mysql", "logs")
+	}
+	if p.Audit.SlowQueryThreshold == 0 {
+		p.Audit.SlowQueryThreshold = Duration(time.Second)
+	}
+	if p.Audit.RingBufferSize == 0 {
+		p.Audit.RingBufferSize = 1000
+	}
+	if strings.HasPrefix(p.Audit.LogDir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p.Audit.LogDir = filepath.Join(home, p.Audit.LogDir[2:])
+		}
+	}
+	return validateProfile(p)
+}
+
+func validateProfile(p *ProfileConfig) error {
+	if p.MySQL.User == "" {
 		return fmt.Errorf("mysql.user must not be empty")
 	}
-	if c.MySQL.Database == "" {
+	if p.MySQL.Database == "" {
 		return fmt.Errorf("mysql.database must not be empty (used to qualify unqualified table names)")
 	}
-	for _, s := range c.Security.AllowedStatements {
+	for _, s := range p.Security.AllowedStatements {
 		if !validStatements[s] {
 			return fmt.Errorf("allowed_statements contains unknown statement type %q (valid: select/insert/update/delete/ddl)", s)
 		}
 	}
-	for _, p := range c.Security.TableWhitelist {
-		if !whitelistPattern.MatchString(p) {
-			return fmt.Errorf("invalid table_whitelist pattern %q (expected db.table form, * wildcard allowed)", p)
+	for _, pattern := range p.Security.TableWhitelist {
+		if !whitelistPattern.MatchString(pattern) {
+			return fmt.Errorf("invalid table_whitelist pattern %q (expected db.table form, * wildcard allowed)", pattern)
 		}
 	}
-	if c.Security.MaxScriptStatements < 0 {
+	if p.Security.MaxScriptStatements < 0 {
 		return fmt.Errorf("max_script_statements must not be negative")
+	}
+	if p.Audit.RingBufferSize < 1 {
+		return fmt.Errorf("audit.ring_buffer_size must be positive")
 	}
 	return nil
 }

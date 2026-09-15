@@ -20,9 +20,10 @@
 
 ## 功能特性
 
+- **独立连接 profile** —— 一个进程管理多个 MySQL 连接，每个 profile 独立拥有连接池、安全规则、审计文件和统计。先用 `list_profile` 获取名称及描述，再为每个 SQL 工具显式传入 `profile`。
 - **语句类型分级管控** —— `SELECT` / `INSERT` / `UPDATE` / `DELETE` / DDL 独立开关，默认只读；`SET`、`GRANT`、`CALL`、`USE`、`LOAD DATA`、`LOCK TABLES` 与事务控制（`BEGIN`/`COMMIT`/`ROLLBACK`）一律拒绝——分类本身就是白名单，未知语句类型天然落在拒绝侧。
 - **库表白名单，默认全拒** —— 不进白名单就不可见；支持 `db.*`、`db.table`、`app_*.logs`（两侧各自 glob 匹配，大小写不敏感）。所有表引用都从 AST 提取：JOIN、子查询、派生表、CTE（作用域感知——CTE 名字遮蔽真实表名的走私手法行不通）、多表 DML、`INSERT ... SELECT`、版本化注释，一个都逃不掉。
-- **MCP 表结构 Resources** —— MCP 连接初始化后，每张 MySQL 账号可见且命中白名单的基础表都会暴露为 `mysql:///schema/{database}/{table}`；读取时实时返回 `SHOW CREATE TABLE`，仅移除易变的表级 `AUTO_INCREMENT=N` 计数器。
+- **MCP 表结构 Resources** —— MCP 连接初始化后，每张 MySQL 账号可见且命中白名单的基础表都会暴露为 `mysql:///schema/{profile}/{database}/{table}`；读取时实时返回 `SHOW CREATE TABLE`，仅移除易变的表级 `AUTO_INCREMENT=N` 计数器。
 - **执行护栏** —— 返回行数硬上限、查询超时、强制单语句、无 `WHERE` 的 `UPDATE`/`DELETE` 拦截。
 - **执行监控** —— 每条 SQL 记录耗时与行数，慢查询自动标记；`mysql_stats` 工具让你在对话里直接问"刚才哪条最慢"。
 - **结构化审计（可选落盘）** —— JSONL 按天滚动，被拒绝的 SQL 连同命中的规则名一起记录。默认关闭：不开就不写任何日志文件。
@@ -33,29 +34,34 @@
 
 ## MCP 工具
 
+全部 7 个 `mysql_*` 工具都必填非空字符串 `profile`，其值必须匹配配置中的名称。没有默认连接：缺失或未知 profile 会在访问数据库前被拒绝。`mysql_describe_table` 省略 `database` 时使用所选 profile 的默认库。
+
 | 工具 | 说明 |
 |---|---|
+| `list_profile` | 无参数；按名称排序返回名称和描述，同时提供文本与结构化 `{profiles: [{name, description}]}`，不探测连接、不返回凭据 |
 | `mysql_query` | 执行单条只读语句（`SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`） |
 | `mysql_execute` | 执行单条写语句（`INSERT` / `UPDATE` / `DELETE` / DDL，需在配置中逐类开启），返回影响行数 |
 | `mysql_script` | 在单个事务内原子执行 `;` 分隔的多语句脚本——全成或全回滚；禁止 DDL |
 | `mysql_explain` | 单条 `SELECT` 的执行计划（`format`：`traditional` / `json` / `tree`；`analyze: true` 执行 `EXPLAIN ANALYZE`） |
 | `mysql_list_tables` | 列出白名单内可见的基础表 |
 | `mysql_describe_table` | 查看白名单内某表的列结构 |
-| `mysql_stats` | 本会话统计：总数/拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数 |
+| `mysql_stats` | 指定 profile 在当前进程内的统计窗口：profile 名称、总数/拒绝数、平均与 P95 耗时、慢查询 Top N、按表访问计数 |
+
+例如先以 `{}` 调用 `list_profile`，再以 `{"profile":"dev","sql":"SELECT * FROM myapp.orders LIMIT 10"}` 调用 `mysql_query`，或以 `{"profile":"dev","top_n":5}` 调用 `mysql_stats`。查看、修改及验证数据时保持目标 profile 一致。
 
 ## MCP Resources
 
-服务端在 MCP 连接初始化时获取一次表快照，并为每张可见的基础表注册一个 direct Resource：
+服务端在 MCP 初始化/discovery 时分别获取各 profile 的表快照，并为每张可见的基础表注册一个 direct Resource。资源名称也包含 profile，不同服务器上的同名库表可以独立识别：
 
 | URI | MIME 类型 | 内容 |
 |---|---|---|
-| `mysql:///schema/{database}/{table}` | `application/sql` | 当前的、经过归一化的 `SHOW CREATE TABLE` 输出 |
+| `mysql:///schema/{profile}/{database}/{table}` | `application/sql` | 当前的、经过归一化的 `SHOW CREATE TABLE` 输出 |
 
-这里的“可见”是 MySQL 配置账号可见范围与 `security.table_whitelist` 的交集；View 不会注册为 Resource。Resource discovery 不受 `security.max_rows` 限制，即使 `allowed_statements` 没有开启 `select` 也可读取，因为 discovery/read 执行的是服务端固定元数据 SQL，而不是用户提交的 SQL。
+这里的“可见”是该 profile 的 MySQL 账号可见范围与其 `security.table_whitelist` 的交集；View 不会注册为 Resource。Resource discovery 不受 `security.max_rows` 限制，即使 `allowed_statements` 没有开启 `select` 也可读取，因为 discovery/read 执行的是服务端固定元数据 SQL，而不是用户提交的 SQL。
 
-Resource **集合**是连接时快照：之后新建的表需重连才会出现；已删除或新近失权的表会在读取时返回 MCP Resource Not Found。Resource **内容**则实时读取，因此 `ALTER TABLE` 会在下次读取时体现。Resource discovery/read 不进入审计日志或 `mysql_stats`；初始化查库失败只写 stderr，Resource 列表为空，但 Tools 仍可使用。
+Resource **集合**是发现时快照：之后新建的表需下一次 discovery 或重连才会出现；已删除或新近失权的表会在读取时返回 MCP Resource Not Found。Resource **内容**则实时读取，因此 `ALTER TABLE` 会在下次读取时体现。Resource discovery/read 不进入审计日志或 `mysql_stats`；发现失败会记录 profile 名称并仅清空该 profile 的表资源，其他 profile、Tools 与共享的查询结果 App 仍可使用。
 
-将 `resources.enabled` 设为 `false` 可关闭整个 Resource 功能。它默认是 `true`；关闭后服务端不会声明 Resources、注册表或 MCP App Resource，也不会在初始化/discovery 时查询 MySQL。交互式 MCP App 因而不可用，但全部 7 个工具仍可使用，`mysql_query` 的文本和结构化结果也保持不变。
+顶层 `resources.enabled` 对全部 profile 生效，设为 `false` 可关闭整个 Resource 功能。它默认是 `true`；关闭后服务端不会声明 Resources、注册表或 MCP App Resource，也不会在初始化/discovery 时查询任何 profile 的 MySQL。交互式 MCP App 因而不可用，但全部 8 个工具仍可使用，`mysql_query` 的文本和结构化结果也保持不变。
 
 ## 快速开始
 
@@ -85,18 +91,25 @@ cp config.example.yaml ~/.mcp-server-mysql/config.yaml
 最小配置：
 
 ```yaml
-mysql:
-  host: 127.0.0.1
-  port: 3306
-  user: mcp_dev                  # 建议专用最小权限账号，勿用 root
-  password: ${MYSQL_MCP_PASSWORD}
-  database: myapp
+resources:
+  enabled: true
+profiles:
+  dev:
+    description: 开发数据库
+    mysql:
+      host: 127.0.0.1
+      port: 3306
+      user: mcp_dev                  # 建议专用最小权限账号，勿用 root
+      password: ${MYSQL_MCP_PASSWORD}
+      database: myapp
 
-security:
-  allowed_statements: [select]   # 确有需要再追加 insert/update/delete/ddl
-  table_whitelist:
-    - "myapp.*"
+    security:
+      allowed_statements: [select]   # 确有需要再追加 insert/update/delete/ddl
+      table_whitelist:
+        - "myapp.*"
 ```
+
+在 `profiles` 下增加同级条目即可配置其他连接；各条目使用相同的 `mysql`、`security`、`audit` 字段。完整注释示例包含两个 profile。下方客户端示例对应上述最小配置；使用其他配置时，需要向 MCP 进程传入所有引用到的密码环境变量。
 
 ### 3. 接入 MCP 客户端
 
@@ -147,9 +160,11 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 
 ## 交互式查询结果（MCP Apps）
 
-`mysql_query` 会向支持 [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) 的 Host 声明内嵌资源 `ui://mcp-server-mysql/query-results`。查询成功时同时返回原有可读文本和结构化查询数据，因此旧版或纯文本 Host 会自然降级，不会丢失结果。其余六个工具保持纯文本模式。
+`mysql_query` 会向支持 [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) 的 Host 声明内嵌资源 `ui://mcp-server-mysql/query-results`。查询成功时同时返回原有可读文本和带必填 `profile` 字段的结构化查询数据，因此旧版或纯文本 Host 会自然降级，不会丢失结果。查询错误保留原有文本，并在结果 metadata 中携带原始 `{profile, sql}`，供 App 准确关联请求。`list_profile` 同样返回文本和结构化数据，其余六个工具使用文本结果。
 
-结果页在当前 View 内最多保留 20 份快照，支持全局筛选、可选 `status` 筛选、自然数值排序、列显隐、行选择，以及 TSV/CSV/JSON 复制。刷新会通过 Host 再次调用 `mysql_query`；若 Host 未向 App 开放工具调用能力，页面会明确提示刷新不可用，其他只读交互仍可使用。历史只保存在内存中，关闭 View 即清空。
+结果页在当前 View 内最多保留 20 份快照，支持全局筛选、可选 `status` 筛选、自然数值排序、列显隐、行选择，以及 TSV/CSV/JSON 复制。结果与历史均标明 profile，失败和取消记录也保留来源。刷新会使用当前选中历史的原始 `{profile, sql}` 通过 Host 再次调用 `mysql_query`；若 Host 未向 App 开放工具调用能力，页面会明确提示刷新不可用，其他只读交互仍可使用。历史只保存在内存中，关闭 View 即清空。
+
+多个请求重叠时，如果 Host 的错误或取消通知不足以识别请求，历史会标为“来源未确定”并保留候选输入，不会按通知到达顺序猜测所属 profile。
 
 ### 本地 Basic Host 开发
 
@@ -172,11 +187,13 @@ MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
                                ▼
 ┌───────────────────────  mcp-server-mysql  ───────────────────────┐
 │                                                                  │
-│  表结构 Resources：mysql:///schema/{database}/{table}            │
+│  表结构 Resources：mysql:///schema/{profile}/{database}/{table} │
 │  固定元数据 SQL · 仅基础表 · 白名单过滤                          │
 │                                                                  │
 │  mysql_query · mysql_execute · mysql_script · mysql_explain      │
 │  mysql_list_tables · mysql_describe_table · mysql_stats          │
+│  必填 profile → Manager.Get → 独立运行实例                      │
+│  list_profile → 配置中的名称和描述（不访问数据库）              │
 │                             │                                    │
 │                             ▼                                    │
 │  ┌ 第一道 · AST 主闸（TiDB parser） ────────────────────────┐    │
@@ -245,12 +262,15 @@ MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
 
 ## 配置
 
+`profiles` 必须是非空映射；名称匹配 `[a-z0-9][a-z0-9_-]*`，`description` 可省略，默认为空字符串。各 profile 分别应用相同默认值，不从其他 profile 继承配置。下表的 `mysql.*`、`security.*`、`audit.*` 与 `description` 均位于 `profiles.<name>` 下；只有 `resources.enabled` 是全局配置。
+
 完整注释示例见 [config.example.yaml](config.example.yaml)。核心原则是**缺省即安全**：不配 `allowed_statements` 就是只读，不配 `table_whitelist` 就是全拒，`block_unfiltered_writes` 不写就是开启。
 
 并且**启动即 fail-closed**：文件不可读、未知或拼错的配置键、非法时长、白名单模式格式不对、未知语句类型、脚本上限为负、`mysql.user`/`mysql.database` 缺失——任何一条都直接退出，拒绝带病运行。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
+| `description` | `""` | 连接用途说明，由 `list_profile` 返回 |
 | `mysql.host` | `127.0.0.1` | Docker 内连宿主机用 `host.docker.internal` |
 | `mysql.port` | `3306` | |
 | `mysql.user` | — 必填 | 建议专用最小权限账号 |
@@ -271,14 +291,23 @@ MYSQL_MCP_PASSWORD=your-password mcp-server-mysql \
 
 敏感信息不必写进文件：整个配置文件在解析前会做环境变量展开，`${ENV_VAR}` 在**任意**字段都生效。配置路径本身也可以用环境变量 `MYSQL_MCP_CONFIG` 代替 `--config` 传入。
 
+### 从单连接配置迁移
+
+1. 将原顶层 `mysql`、`security`、`audit` 三组配置原样移入例如 `profiles.dev` 的条目中；`resources` 保持顶层。
+2. 为全部 7 个 `mysql_*` 工具调用增加 `profile`；可先调用 `list_profile` 发现可用名称。即使只配置一个连接，也没有隐式 `default` profile。
+3. 重启服务并重新连接客户端，刷新工具 schema 和带 profile 的 Resource URI。
+
+旧版顶层连接配置、空或非法 profile、未知配置字段均会被拒绝。profile 配置在重启后生效。连接池使用懒连接：数据库不可达时，在访问该 profile 的工具或资源时返回错误，`list_profile` 仍能列出其配置。每条 SQL 或脚本绑定一个 profile，同一连接内经白名单允许的跨库访问继续可用；不支持跨 profile 事务或运行时 profile 管理。
+
 ## 审计日志
 
-落盘由 `audit.enabled` 控制——**默认 `false`：不写日志文件、不创建日志目录**。会话内统计（`mysql_stats`）基于内存环形缓冲，无论开关始终可用（进程重启归零）。
+落盘由各 profile 的 `audit.enabled` 独立控制——**默认 `false`：不写日志文件、不创建日志目录**。每个 profile 独立维护统计环形缓冲和慢查询阈值，`mysql_stats` 仅返回所请求 profile 的统计窗口并标明名称。统计由当前进程中使用该 profile 的调用方共享，无论落盘开关始终可用，重启归零。
 
-开启后，JSONL 按天滚动（`audit-2026-07-02.jsonl`），每行一条 JSON：
+开启后，JSONL 按 `audit-<profile>-<YYYY-MM-DD>.jsonl` 命名并按天滚动，例如 `audit-dev-2026-09-15.jsonl`。即使多个 profile 配置相同 `audit.log_dir`，也使用独立文件；每行一条 JSON：
 
 | 字段 | 含义 |
 |---|---|
+| `profile` | 所属连接 profile，由其 Logger 统一填写 |
 | `ts` / `tool` / `sql` | 时间戳、工具名、SQL 原文 |
 | `decision` / `rule` | `allowed` 或 `denied`，及拒绝时命中的规则名 |
 | `class` / `tables` | 语句类型、涉及的库表 |
@@ -297,13 +326,14 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 
 - **MySQL 8.x** —— E2E 测试基于 testcontainers 在 MySQL 8.0（8.0.45）上运行。MySQL 5.7 与 MariaDB 未经测试。
 - **MCP** —— 使用 Go SDK v1.7.0，提供 MySQL 表结构 direct Resources，声明 `io.modelcontextprotocol/ui` 扩展并内嵌一个 MCP App 资源；不支持 MCP Apps 的 Host 仍可使用文本降级结果。
-- **传输** —— 默认 stdio；本地开发可使用仅回环监听的无状态 Streamable HTTP。server 标识为 `mcp-server-mysql`，暴露 7 个工具、表结构 direct Resources、1 个 UI 资源，无 prompts。
+- **传输** —— 默认 stdio；本地开发可使用仅回环监听的无状态 Streamable HTTP。server 标识为 `mcp-server-mysql`，暴露 8 个工具、表结构 direct Resources、1 个共享 UI 资源，无 prompts。
 - **运行时消息** —— 工具描述与运行时输出（结果标注、`DENIED` 原因）为英文，便于各类客户端与国际用户使用；规则名与审计字段本就是英文，保持稳定。
 
 ## 开发
 
 ```bash
 go test ./... -short           # 单元测试（不需要 Docker）
+go test -race ./... -short     # 并发检查，含 profile 隔离
 go test ./... -timeout 600s    # 全量，含 testcontainers 集成/E2E 测试（需要 Docker）
 
 cd ui/query-results

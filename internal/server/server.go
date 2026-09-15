@@ -18,9 +18,11 @@ import (
 	"github.com/Kurok1/mcp-server-mysql/internal/config"
 	"github.com/Kurok1/mcp-server-mysql/internal/executor"
 	"github.com/Kurok1/mcp-server-mysql/internal/guard"
+	"github.com/Kurok1/mcp-server-mysql/internal/profile"
 )
 
 type deps struct {
+	profile        string
 	g              *guard.Guard
 	ex             *executor.Executor
 	log            *audit.Logger
@@ -30,47 +32,59 @@ type deps struct {
 }
 
 type QueryIn struct {
-	SQL string `json:"sql" jsonschema:"The single read-only SQL statement to run (SELECT/SHOW/DESCRIBE/EXPLAIN)"`
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
+	SQL     string `json:"sql" jsonschema:"The single read-only SQL statement to run (SELECT/SHOW/DESCRIBE/EXPLAIN)"`
 }
 
 type ExecuteIn struct {
-	SQL string `json:"sql" jsonschema:"The single write statement to run (INSERT/UPDATE/DELETE/DDL; the type must be enabled in config)"`
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
+	SQL     string `json:"sql" jsonschema:"The single write statement to run (INSERT/UPDATE/DELETE/DDL; the type must be enabled in config)"`
 }
 
-type ListTablesIn struct{}
+type ListTablesIn struct {
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
+}
 
 type DescribeIn struct {
+	Profile  string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
 	Database string `json:"database,omitempty" jsonschema:"Database name; defaults to the configured database"`
 	Table    string `json:"table" jsonschema:"Table name"`
 }
 
 type StatsIn struct {
-	TopN int `json:"top_n,omitempty" jsonschema:"Top N slow queries, default 5"`
+	Profile string `json:"profile" jsonschema:"Database profile to use; call list_profile to discover available names"`
+	TopN    int    `json:"top_n,omitempty" jsonschema:"Top N slow queries, default 5"`
 }
 
+// ProfileProvider is the server's narrow view of configured database profiles.
+// It is defined here so unit tests can provide controlled runtimes.
+type ProfileProvider interface {
+	Get(string) (*profile.Runtime, error)
+	List() []profile.Info
+}
+
+type toolHandlers struct {
+	profiles ProfileProvider
+}
+
+const queryInputMetaKey = "io.github.kurok1.mcp-server-mysql/query-input"
+
 // Build 装配 MCP server；main 与 E2E 测试共用。
-func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit.Logger) *mcp.Server {
-	d := &deps{
-		g:              g,
-		ex:             ex,
-		log:            log,
-		db:             cfg.MySQL.Database,
-		maxRows:        cfg.Security.MaxRows,
-		maxScriptStmts: cfg.Security.MaxScriptStatements,
-	}
-	resourcesEnabled := cfg.Resources.IsEnabled()
+func Build(resourcesCfg config.ResourcesConfig, profiles ProfileProvider) *mcp.Server {
+	resourcesEnabled := resourcesCfg.IsEnabled()
+	handlers := &toolHandlers{profiles: profiles}
 	var s *mcp.Server
 	opts := &mcp.ServerOptions{Capabilities: queryAppCapabilities(resourcesEnabled)}
 	var resources *tableResourceRegistry
 	if resourcesEnabled {
-		resources = &tableResourceRegistry{}
+		resources = newTableResourceRegistry(profiles)
 		opts.InitializedHandler = func(ctx context.Context, _ *mcp.InitializedRequest) {
-			resources.load(ctx, s, d)
+			resources.load(ctx, s)
 		}
 	}
-	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.0.1"}, opts)
+	s = mcp.NewServer(&mcp.Implementation{Name: "mcp-server-mysql", Version: "2.1.0"}, opts)
 	if resourcesEnabled {
-		s.AddReceivingMiddleware(resources.discoveryMiddleware(s, d))
+		s.AddReceivingMiddleware(resources.discoveryMiddleware(s))
 	}
 
 	truePtr := true
@@ -83,41 +97,140 @@ func Build(cfg *config.Config, g *guard.Guard, ex *executor.Executor, log *audit
 	if resourcesEnabled {
 		queryTool.Meta = queryToolMeta()
 	}
-	mcp.AddTool(s, queryTool, d.handleQuery)
+	mcp.AddTool(s, queryTool, handlers.handleQuery)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_execute",
 		Description: "Run a single write statement (INSERT/UPDATE/DELETE/DDL types enabled in config); returns affected rows. The default config denies all writes.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
-	}, d.handleExecute)
+	}, handlers.handleExecute)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_script",
 		Description: "Run a multi-statement script (;-separated) in a single read-write transaction: every statement is guard-checked, any failure rolls back everything, commit only if all succeed. DDL is banned; write types must be enabled in allowed_statements.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &truePtr},
-	}, d.handleScript)
+	}, handlers.handleScript)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_list_tables",
 		Description: "List base tables visible through the table whitelist, capped by security.max_rows.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, d.handleListTables)
+	}, handlers.handleListTables)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_describe_table",
 		Description: "Show the column structure of a whitelisted table.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, d.handleDescribe)
+	}, handlers.handleDescribe)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_stats",
-		Description: "Session SQL execution stats: totals/denials, average and P95 latency, top-N slow queries, per-table access counts.",
+		Description: "SQL execution stats for the selected profile in this process window: totals/denials, average and P95 latency, top-N slow queries, per-table access counts.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, d.handleStats)
+	}, handlers.handleStats)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "mysql_explain",
 		Description: "Return the execution plan for a single SELECT. format: traditional (default) / json / tree; analyze=true runs EXPLAIN ANALYZE (actually executes the query and returns real timing/rows).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, d.handleExplain)
+	}, handlers.handleExplain)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_profile",
+		Description: "List configured database profiles and their descriptions.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handlers.handleListProfiles)
 	if resourcesEnabled {
 		registerQueryAppResource(s)
 	}
 	return s
+}
+
+func depsForRuntime(runtime *profile.Runtime) *deps {
+	return &deps{
+		profile:        runtime.Name,
+		g:              runtime.Guard,
+		ex:             runtime.Executor,
+		log:            runtime.Audit,
+		db:             runtime.Database,
+		maxRows:        runtime.MaxRows,
+		maxScriptStmts: runtime.MaxScriptStatements,
+	}
+}
+
+func (h *toolHandlers) resolve(name string) (*deps, *mcp.CallToolResult) {
+	if strings.TrimSpace(name) == "" {
+		return nil, errResult("profile is required")
+	}
+	runtime, err := h.profiles.Get(name)
+	if err != nil {
+		return nil, errResult("invalid profile: " + err.Error())
+	}
+	if runtime == nil {
+		return nil, errResult("invalid profile: profile runtime is unavailable")
+	}
+	return depsForRuntime(runtime), nil
+}
+
+func (h *toolHandlers) handleQuery(ctx context.Context, req *mcp.CallToolRequest, in QueryIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return queryErrorWithContext(failed, in), nil, nil
+	}
+	return queryErrorWithContext(d.run(ctx, "mysql_query", in.SQL, guard.ToolQuery), in), nil, nil
+}
+
+// queryErrorWithContext lets the query-results app associate an error with the
+// request that produced it without violating mysql_query's success schema.
+// Successful query results keep QueryAppResult.
+func queryErrorWithContext(result *mcp.CallToolResult, in QueryIn) *mcp.CallToolResult {
+	if result.IsError {
+		if result.Meta == nil {
+			result.Meta = mcp.Meta{}
+		}
+		result.Meta[queryInputMetaKey] = in
+	}
+	return result
+}
+
+func (h *toolHandlers) handleExecute(ctx context.Context, req *mcp.CallToolRequest, in ExecuteIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.run(ctx, "mysql_execute", in.SQL, guard.ToolExecute), nil, nil
+}
+
+func (h *toolHandlers) handleListTables(ctx context.Context, req *mcp.CallToolRequest, in ListTablesIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.handleListTables(ctx, req, in)
+}
+
+func (h *toolHandlers) handleDescribe(ctx context.Context, req *mcp.CallToolRequest, in DescribeIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.handleDescribe(ctx, req, in)
+}
+
+func (h *toolHandlers) handleStats(ctx context.Context, req *mcp.CallToolRequest, in StatsIn) (*mcp.CallToolResult, any, error) {
+	d, failed := h.resolve(in.Profile)
+	if failed != nil {
+		return failed, nil, nil
+	}
+	return d.handleStats(ctx, req, in)
+}
+
+func (h *toolHandlers) handleListProfiles(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	profiles := h.profiles.List()
+	payload := struct {
+		Profiles []profile.Info `json:"profiles"`
+	}{Profiles: profiles}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return errResult("failed to serialize profiles: " + err.Error()), nil, nil
+	}
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: string(b)}},
+		StructuredContent: payload,
+	}, nil, nil
 }
 
 func textResult(s string) *mcp.CallToolResult {
@@ -171,7 +284,7 @@ func (d *deps) run(ctx context.Context, tool, sqlText string, gt guard.Tool) *mc
 	}
 	d.log.Log(rec)
 	if tool == "mysql_query" && queryResult != nil {
-		return queryAppResult(text, d.db, sqlText, dec.Tables, queryResult, rec.DurationMS, time.Now())
+		return queryAppResult(text, d.profile, d.db, sqlText, dec.Tables, queryResult, rec.DurationMS, time.Now())
 	}
 	return textResult(text)
 }

@@ -8,6 +8,7 @@ import "time"
 
 // Record 一次工具调用的完整审计记录（含被拒绝的）。
 type Record struct {
+	Profile    string    `json:"profile"`
 	Timestamp  time.Time `json:"ts"`
 	Tool       string    `json:"tool"`
 	SQL        string    `json:"sql"`

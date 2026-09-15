@@ -25,13 +25,19 @@ import {
 import {
   addHistory,
   cancelledHistoryEntry,
+  extractText,
   historyEntryFromToolResult,
+  parseQueryInput,
+  parseQueryPayload,
+  QUERY_INPUT_META_KEY,
   previewResult,
   serializeRows,
   statusColumnIndex,
   titleForResult,
+  unattributedHistoryEntry,
   visibleRows,
   type HistoryEntry,
+  type QueryInput,
   type QueryResultPayload,
   type SortState,
   type ToolResultLike,
@@ -72,6 +78,9 @@ const messages = {
     menu: "More actions",
     history: "Query history",
     closeHistory: "Close query history",
+    sourceUnknown: "Source undetermined",
+    sourceCandidates: "Possible sources",
+    sourceUnavailable: "No request context was available to identify the source.",
   },
   "zh-CN": {
     appTitle: "查询结果",
@@ -104,6 +113,9 @@ const messages = {
     menu: "更多操作",
     history: "查询历史",
     closeHistory: "关闭查询历史",
+    sourceUnknown: "来源未确定",
+    sourceCandidates: "可能的来源",
+    sourceUnavailable: "没有可用于确认来源的请求上下文。",
   },
 } as const;
 
@@ -140,6 +152,7 @@ function HistorySidebar({
   history,
   activeID,
   database,
+  profile,
   locale,
   open,
   onSelect,
@@ -148,6 +161,7 @@ function HistorySidebar({
   history: HistoryEntry[];
   activeID: string;
   database?: string;
+  profile?: string;
   locale: Locale;
   open: boolean;
   onSelect: (id: string) => void;
@@ -161,6 +175,7 @@ function HistorySidebar({
         <div>
           <h1>{t.appTitle}</h1>
           <p><Database size={17} /> <span>{database || "mysql"}</span><span className="dot">·</span><span>{t.readOnly}</span></p>
+          {profile && <p className="profile-label">{profile}</p>}
         </div>
         <button className="icon-button history-close" type="button" onClick={onClose} aria-label={t.closeHistory}>
           <X size={18} />
@@ -181,6 +196,7 @@ function HistorySidebar({
               </span>
               <span className="history-time">{timeLabel(item.recordedAt, locale)}</span>
               <span className="history-tool">mysql_query</span>
+              <span className="history-profile" title={item.profile || t.sourceUnknown}>{item.profile || t.sourceUnknown}</span>
               <span className="history-count">{rows === undefined ? (item.status === "cancelled" ? t.cancelled : t.failed) : `${rows} rows`}</span>
               <span className={`history-state history-state--${item.status}`} aria-hidden="true" />
             </button>
@@ -188,8 +204,17 @@ function HistorySidebar({
         })}
       </nav>
       <section className="sql-panel">
-        <h2><CaretDown size={15} /> {t.sql}</h2>
+          <h2><CaretDown size={15} /> {t.sql}</h2>
+        <p className="sql-profile">{active?.profile || t.sourceUnknown}</p>
         <pre>{active?.sql || "—"}</pre>
+        {active?.candidates && (
+          <section className="source-candidates" aria-label={t.sourceCandidates}>
+            <h3>{t.sourceCandidates}</h3>
+            {active.candidates.length > 0 ? (
+              <ul>{active.candidates.map((candidate) => <li key={`${candidate.profile}-${candidate.sql}`}><strong>{candidate.profile}</strong><code>{candidate.sql}</code></li>)}</ul>
+            ) : <p>{t.sourceUnavailable}</p>}
+          </section>
+        )}
         <button type="button" className="text-button" onClick={() => void copyText(active?.sql || "")} disabled={!active?.sql}>
           <Copy size={18} /> {t.copySQL}
         </button>
@@ -208,14 +233,14 @@ export function App() {
   const [history, setHistory] = useState<HistoryEntry[]>(() =>
     window.parent === window
       ? [
-          { id: previewResult.resultId, status: "success", sql: previewResult.sql, result: previewResult, recordedAt: previewResult.executedAt },
-          { id: "preview-history-2", status: "success", sql: "SELECT customer, status FROM accounts WHERE status = 'Past due'", result: { ...previewResult, resultId: "preview-history-2", executedAt: "2026-08-20T06:27:00Z" }, recordedAt: "2026-08-20T06:27:00Z" },
-          { id: "preview-history-3", status: "success", sql: "SELECT customer, plan FROM accounts ORDER BY customer", result: { ...previewResult, resultId: "preview-history-3", executedAt: "2026-08-20T06:20:00Z" }, recordedAt: "2026-08-20T06:20:00Z" },
+          { id: previewResult.resultId, status: "success", profile: previewResult.profile, sql: previewResult.sql, result: previewResult, recordedAt: previewResult.executedAt },
+          { id: "preview-history-2", status: "success", profile: "billing-readonly", sql: "SELECT customer, status FROM accounts WHERE status = 'Past due'", result: { ...previewResult, resultId: "preview-history-2", profile: "billing-readonly", sql: "SELECT customer, status FROM accounts WHERE status = 'Past due'", executedAt: "2026-08-20T06:27:00Z" }, recordedAt: "2026-08-20T06:27:00Z" },
+          { id: "preview-history-3", status: "success", profile: previewResult.profile, sql: "SELECT customer, plan FROM accounts ORDER BY customer", result: { ...previewResult, resultId: "preview-history-3", sql: "SELECT customer, plan FROM accounts ORDER BY customer", executedAt: "2026-08-20T06:20:00Z" }, recordedAt: "2026-08-20T06:20:00Z" },
         ]
       : [],
   );
   const [activeID, setActiveID] = useState(() => (window.parent === window ? previewResult.resultId : ""));
-  const [pendingSQL, setPendingSQL] = useState("");
+  const [pendingInput, setPendingInput] = useState<QueryInput | null>(null);
   const [executing, setExecuting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState("");
@@ -228,7 +253,8 @@ export function App() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
-  const pendingSQLRef = useRef("");
+  const pendingInputsRef = useRef<QueryInput[]>([]);
+  const unattributedTerminalsRef = useRef(0);
 
   const pushEntry = (entry: HistoryEntry) => {
     setHistory((current) => addHistory(current, entry));
@@ -241,14 +267,80 @@ export function App() {
     setSelectedRows(new Set());
   };
 
+  const synchronizePendingState = () => {
+    const pending = pendingInputsRef.current;
+    if (unattributedTerminalsRef.current >= pending.length) {
+      pendingInputsRef.current = [];
+      unattributedTerminalsRef.current = 0;
+      setPendingInput(null);
+      setExecuting(false);
+      return;
+    }
+    setPendingInput(pending[0] || null);
+    setExecuting(pending.length > unattributedTerminalsRef.current);
+  };
+
+  const removePendingInput = (input: QueryInput): boolean => {
+    const index = pendingInputsRef.current.findIndex(
+      (pending) => pending.profile === input.profile && pending.sql === input.sql,
+    );
+    if (index < 0) return false;
+    pendingInputsRef.current.splice(index, 1);
+    synchronizePendingState();
+    return true;
+  };
+
+  const recordUnattributedTerminal = (status: "error" | "cancelled", reason?: string) => {
+    const candidates = [...pendingInputsRef.current];
+    pushEntry(unattributedHistoryEntry(status, candidates, reason));
+    if (candidates.length > 0) unattributedTerminalsRef.current += 1;
+    synchronizePendingState();
+  };
+
   const mcp = useMcpApp({
-    onToolInput: (sql) => {
-      pendingSQLRef.current = sql;
-      setPendingSQL(sql);
-      setExecuting(true);
+    onToolInput: (input) => {
+      if (!input) return;
+      pendingInputsRef.current = [...pendingInputsRef.current, input];
+      setPendingInput(input);
+      setExecuting(pendingInputsRef.current.length > unattributedTerminalsRef.current);
     },
-    onToolResult: (result) => pushEntry(historyEntryFromToolResult(result, pendingSQLRef.current)),
-    onToolCancelled: (reason) => pushEntry(cancelledHistoryEntry(pendingSQLRef.current, reason)),
+    onToolResult: (toolResult) => {
+      const payload = toolResult.isError ? null : parseQueryPayload(toolResult.structuredContent);
+      const source = toolResult.isError
+        ? parseQueryInput(toolResult._meta?.[QUERY_INPUT_META_KEY])
+        : payload
+          ? { profile: payload.profile, sql: payload.sql }
+          : null;
+      if (source) {
+        removePendingInput(source);
+        pushEntry(historyEntryFromToolResult(toolResult, source));
+        synchronizePendingState();
+        return;
+      }
+      if (pendingInputsRef.current.length === 1 && unattributedTerminalsRef.current === 0) {
+        const input = pendingInputsRef.current[0];
+        if (!input) return;
+        removePendingInput(input);
+        pushEntry(historyEntryFromToolResult(toolResult, input));
+        synchronizePendingState();
+        return;
+      }
+      recordUnattributedTerminal(
+        "error",
+        toolResult.isError ? extractText(toolResult) : "The server returned an invalid query result.",
+      );
+    },
+    onToolCancelled: (reason) => {
+      if (pendingInputsRef.current.length === 1 && unattributedTerminalsRef.current === 0) {
+        const input = pendingInputsRef.current[0];
+        if (!input) return;
+        removePendingInput(input);
+        pushEntry(cancelledHistoryEntry(input, reason));
+        synchronizePendingState();
+        return;
+      }
+      recordUnattributedTerminal("cancelled", reason);
+    },
   });
 
   const locale = mcp.preview ? previewLocale : localeFrom(mcp.hostContext?.locale);
@@ -300,6 +392,7 @@ export function App() {
   const refresh = async () => {
     const app = mcp.app;
     if (!result || refreshing || (!mcp.preview && (!app || !mcp.canCallTools))) return;
+    const refreshInput: QueryInput = { profile: result.profile, sql: result.sql };
     setMoreOpen(false);
     setRefreshing(true);
     try {
@@ -311,20 +404,20 @@ export function App() {
           durationMs: Math.max(1, result.durationMs + 2),
           executedAt: new Date().toISOString(),
         };
-        pushEntry(historyEntryFromToolResult({ structuredContent: refreshed }, result.sql));
+        pushEntry(historyEntryFromToolResult({ structuredContent: refreshed }, refreshInput));
         return;
       }
       if (!app) return;
       const refreshed = (await app.callServerTool({
         name: "mysql_query",
-        arguments: { sql: result.sql },
+        arguments: refreshInput,
       })) as ToolResultLike;
-      pushEntry(historyEntryFromToolResult(refreshed, result.sql));
+      pushEntry(historyEntryFromToolResult(refreshed, refreshInput));
     } catch (error) {
       pushEntry(
         historyEntryFromToolResult(
           { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] },
-          result.sql,
+          refreshInput,
         ),
       );
     } finally {
@@ -345,9 +438,9 @@ export function App() {
   const renderBody = () => {
     if (mcp.connecting) return <div className="state-panel"><SpinnerGap className="spin" size={25} /><strong>{t.connecting}</strong></div>;
     if (mcp.connectionError) return <div className="state-panel state-panel--error"><Warning size={25} /><strong>{t.connectionFailed}</strong><span>{mcp.connectionError}</span></div>;
-    if (executing && history.length === 0) return <div className="state-panel"><SpinnerGap className="spin" size={25} /><strong>{t.executing}</strong><code>{pendingSQL}</code></div>;
+    if (executing && history.length === 0) return <div className="state-panel"><SpinnerGap className="spin" size={25} /><strong>{t.executing}</strong><code>{pendingInput?.profile}: {pendingInput?.sql}</code></div>;
     if (!active) return <div className="state-panel"><Database size={27} /><strong>{t.empty}</strong></div>;
-    if (active.status !== "success") return <div className="state-panel state-panel--error"><Warning size={25} /><strong>{active.status === "cancelled" ? t.cancelled : t.failed}</strong><span>{active.message}</span><code>{active.sql}</code></div>;
+    if (active.status !== "success") return <div className="state-panel state-panel--error"><Warning size={25} /><strong>{active.status === "cancelled" ? t.cancelled : t.failed}</strong><span>{active.message}</span><span className="source-context">{active.profile || t.sourceUnknown}</span>{active.candidates && (active.candidates.length > 0 ? <div className="state-candidates"><strong>{t.sourceCandidates}</strong>{active.candidates.map((candidate) => <code key={`${candidate.profile}-${candidate.sql}`}>{candidate.profile}: {candidate.sql}</code>)}</div> : <span>{t.sourceUnavailable}</span>)}<code>{active.sql}</code></div>;
     if (!result) return null;
 
     return (
@@ -415,14 +508,14 @@ export function App() {
 
   return (
     <div className="app-frame">
-      <HistorySidebar history={history} activeID={active?.id || ""} database={result?.database ?? (mcp.preview ? previewResult.database : undefined)} locale={locale} open={historyOpen} onSelect={selectHistory} onClose={() => setHistoryOpen(false)} />
+      <HistorySidebar history={history} activeID={active?.id || ""} database={result?.database ?? (mcp.preview ? previewResult.database : undefined)} profile={active ? active.profile || t.sourceUnknown : (mcp.preview ? previewResult.profile : undefined)} locale={locale} open={historyOpen} onSelect={selectHistory} onClose={() => setHistoryOpen(false)} />
       {historyOpen && <button type="button" className="drawer-backdrop" aria-label={t.closeHistory} onClick={() => setHistoryOpen(false)} />}
       <main className="results-panel">
         <header className="result-header">
           <button type="button" className="icon-button history-trigger" aria-label={t.history} onClick={() => setHistoryOpen(true)}><List size={21} /></button>
           <div className="result-title">
             <h2>{titleForResult(result)}</h2>
-            {result ? <p>{t.rowsReturned(result.rowCount, result.durationMs)}</p> : <p>{executing ? t.executing : t.empty}</p>}
+            {result ? <p><span className="result-profile">{result.profile}</span><span>{t.rowsReturned(result.rowCount, result.durationMs)}</span></p> : <p>{executing ? t.executing : t.empty}</p>}
           </div>
           <div className="sync-actions">
             <span className={`sync-pill ${refreshing || executing ? "sync-pill--busy" : ""}`}>

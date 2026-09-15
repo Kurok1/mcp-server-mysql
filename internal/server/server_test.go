@@ -8,7 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +24,57 @@ import (
 	"github.com/Kurok1/mcp-server-mysql/internal/config"
 	"github.com/Kurok1/mcp-server-mysql/internal/executor"
 	"github.com/Kurok1/mcp-server-mysql/internal/guard"
+	"github.com/Kurok1/mcp-server-mysql/internal/profile"
 )
+
+const testProfileName = "primary"
+
+type testProfileProvider struct {
+	mu       sync.Mutex
+	runtimes map[string]*profile.Runtime
+	getCalls int
+}
+
+func (p *testProfileProvider) Get(name string) (*profile.Runtime, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.getCalls++
+	runtime, ok := p.runtimes[name]
+	if !ok {
+		return nil, errors.New("profile not found")
+	}
+	return runtime, nil
+}
+
+func (p *testProfileProvider) List() []profile.Info {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	infos := make([]profile.Info, 0, len(p.runtimes))
+	for name, runtime := range p.runtimes {
+		infos = append(infos, profile.Info{Name: name, Description: runtime.Description})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+	return infos
+}
+
+func testRuntime(name string, cfg config.ProfileConfig, ex *executor.Executor, logger *audit.Logger) *profile.Runtime {
+	return &profile.Runtime{
+		Name:                name,
+		Description:         cfg.Description,
+		Executor:            ex,
+		Guard:               guard.New(cfg.Security, cfg.MySQL.Database),
+		Audit:               logger,
+		Database:            cfg.MySQL.Database,
+		MaxRows:             cfg.Security.MaxRows,
+		MaxScriptStatements: cfg.Security.MaxScriptStatements,
+	}
+}
+
+func singleProfile(cfg config.ProfileConfig, ex *executor.Executor, logger *audit.Logger) *testProfileProvider {
+	return &testProfileProvider{runtimes: map[string]*profile.Runtime{
+		testProfileName: testRuntime(testProfileName, cfg, ex, logger),
+	}}
+}
 
 func TestFormatResult(t *testing.T) {
 	res := &executor.QueryResult{
@@ -56,7 +110,7 @@ func TestQueryAppResult(t *testing.T) {
 		Truncated: true,
 	}
 	got := queryAppResult(
-		formatResult(query), "myapp", "SELECT id, name FROM accounts",
+		formatResult(query), testProfileName, "myapp", "SELECT id, name FROM accounts",
 		[]string{"myapp.accounts"}, query, 12, executedAt,
 	)
 	if got.IsError {
@@ -73,7 +127,7 @@ func TestQueryAppResult(t *testing.T) {
 	if !ok {
 		t.Fatalf("structured content is %T, want QueryAppResult", got.StructuredContent)
 	}
-	if payload.ResultID == "" || payload.Tool != "mysql_query" || payload.Database != "myapp" {
+	if payload.ResultID == "" || payload.Tool != "mysql_query" || payload.Profile != testProfileName || payload.Database != "myapp" {
 		t.Fatalf("unexpected identity fields: %+v", payload)
 	}
 	if payload.RowCount != 1 || !payload.Truncated || payload.Rows[0][1] != "NULL" {
@@ -84,7 +138,7 @@ func TestQueryAppResult(t *testing.T) {
 	}
 
 	empty := queryAppResult(
-		formatResult(&executor.QueryResult{}), "myapp", "SELECT 1 WHERE FALSE",
+		formatResult(&executor.QueryResult{}), testProfileName, "myapp", "SELECT 1 WHERE FALSE",
 		nil, &executor.QueryResult{}, 1, executedAt,
 	)
 	emptyPayload, ok := empty.StructuredContent.(QueryAppResult)
@@ -101,11 +155,238 @@ func TestQueryAppResult(t *testing.T) {
 	}
 }
 
+func TestProfileResolutionRejectsBlankWithoutLookup(t *testing.T) {
+	provider := &testProfileProvider{runtimes: map[string]*profile.Runtime{}}
+	handlers := &toolHandlers{profiles: provider}
+	_, result := handlers.resolve(" \t")
+	if result == nil || !result.IsError {
+		t.Fatalf("blank profile result = %#v, want error", result)
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.getCalls != 0 {
+		t.Fatalf("blank profile performed %d profile lookups, want 0", provider.getCalls)
+	}
+}
+
+func TestQueryHandlerErrorsIncludeRequestContext(t *testing.T) {
+	session := startMetadataSession(t)
+	for _, tc := range []struct {
+		name  string
+		input QueryIn
+		text  string
+	}{
+		{
+			name:  "guard denial",
+			input: QueryIn{Profile: testProfileName, SQL: "SELECT * FROM mysql.user"},
+			text:  "DENIED [table_whitelist]",
+		},
+		{
+			name:  "execution failure",
+			input: QueryIn{Profile: testProfileName, SQL: "SELECT * FROM accounts"},
+			text:  "execution failed:",
+		},
+		{
+			name:  "unknown profile",
+			input: QueryIn{Profile: "missing", SQL: "SELECT * FROM accounts"},
+			text:  "invalid profile:",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: "mysql_query",
+				Arguments: map[string]any{
+					"profile": tc.input.Profile,
+					"sql":     tc.input.SQL,
+				},
+			})
+			if err != nil {
+				t.Fatalf("mysql_query: %v", err)
+			}
+			if !result.IsError || len(result.Content) != 1 {
+				t.Fatalf("query error result = %#v", result)
+			}
+			text, ok := result.Content[0].(*mcp.TextContent)
+			if !ok || !strings.Contains(text.Text, tc.text) {
+				t.Fatalf("query error text = %#v, want %q", result.Content[0], tc.text)
+			}
+			if result.StructuredContent != nil {
+				t.Fatalf("error structured content = %#v, want nil", result.StructuredContent)
+			}
+			encoded, err := json.Marshal(result.Meta[queryInputMetaKey])
+			if err != nil {
+				t.Fatalf("marshal error input metadata: %v", err)
+			}
+			var context QueryIn
+			if err := json.Unmarshal(encoded, &context); err != nil {
+				t.Fatalf("unmarshal error input metadata: %v", err)
+			}
+			if context != tc.input {
+				t.Fatalf("error input metadata = %#v, want %#v", context, tc.input)
+			}
+		})
+	}
+}
+
+func TestAllDatabaseToolsResolveProfileBeforeToolSpecificWork(t *testing.T) {
+	provider := &testProfileProvider{runtimes: map[string]*profile.Runtime{}}
+	handlers := &toolHandlers{profiles: provider}
+	ctx := context.Background()
+	blankResults := profileToolResults(t, handlers, ctx, "")
+	for _, result := range blankResults {
+		if !result.IsError {
+			t.Fatalf("blank profile result = %#v, want error", result)
+		}
+	}
+	provider.mu.Lock()
+	if provider.getCalls != 0 {
+		provider.mu.Unlock()
+		t.Fatalf("blank profiles performed %d lookups, want 0", provider.getCalls)
+	}
+	provider.mu.Unlock()
+
+	unknownResults := profileToolResults(t, handlers, ctx, "missing")
+	for _, result := range unknownResults {
+		if !result.IsError {
+			t.Fatalf("unknown profile result = %#v, want error", result)
+		}
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.getCalls != 7 {
+		t.Fatalf("unknown profiles performed %d lookups, want 7", provider.getCalls)
+	}
+}
+
+func profileToolResults(t *testing.T, handlers *toolHandlers, ctx context.Context, profileName string) []*mcp.CallToolResult {
+	t.Helper()
+	calls := []func() (*mcp.CallToolResult, any, error){
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleQuery(ctx, nil, QueryIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleExecute(ctx, nil, ExecuteIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleScript(ctx, nil, ScriptIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleListTables(ctx, nil, ListTablesIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleDescribe(ctx, nil, DescribeIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleStats(ctx, nil, StatsIn{Profile: profileName})
+		},
+		func() (*mcp.CallToolResult, any, error) {
+			return handlers.handleExplain(ctx, nil, ExplainIn{Profile: profileName})
+		},
+	}
+	results := make([]*mcp.CallToolResult, 0, len(calls))
+	for _, call := range calls {
+		result, _, err := call()
+		if err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func TestProfileToolSchemasAndListing(t *testing.T) {
+	provider := &testProfileProvider{runtimes: map[string]*profile.Runtime{
+		"zebra": {Name: "zebra", Description: "Z database"},
+		"alpha": {Name: "alpha", Description: "A database"},
+	}}
+	srv := Build(config.ResourcesConfig{Enabled: boolPtr(false)}, provider)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go func() { _ = srv.Run(ctx, serverTransport) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "profile-schema-test", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProfile := map[string]bool{
+		"mysql_query": true, "mysql_execute": true, "mysql_script": true,
+		"mysql_list_tables": true, "mysql_describe_table": true, "mysql_stats": true,
+		"mysql_explain": true,
+	}
+	for _, tool := range tools.Tools {
+		if !wantProfile[tool.Name] {
+			continue
+		}
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		encodedSchema, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s input schema: %v", tool.Name, err)
+		}
+		if err := json.Unmarshal(encodedSchema, &schema); err != nil {
+			t.Fatalf("unmarshal %s input schema: %v", tool.Name, err)
+		}
+		properties := schema.Properties
+		if _, ok := properties["profile"]; !ok {
+			t.Errorf("%s has no profile input schema: %#v", tool.Name, schema)
+		}
+		if !containsString(schema.Required, "profile") {
+			t.Errorf("%s does not require profile: %#v", tool.Name, schema)
+		}
+	}
+	if len(wantProfile) != 7 {
+		t.Fatal("test setup lost a profile-bound tool")
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "list_profile", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("list_profile: %v", err)
+	}
+	encoded, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Profiles []profile.Info `json:"profiles"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Profiles) != 2 || payload.Profiles[0].Name != "alpha" || payload.Profiles[1].Name != "zebra" {
+		t.Fatalf("list_profile payload = %#v", payload)
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.getCalls != 0 {
+		t.Fatalf("list_profile used %d profile runtimes, want none", provider.getCalls)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func startMetadataSession(t *testing.T) *mcp.ClientSession {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	cfg := &config.Config{
+	cfg := config.ProfileConfig{
 		MySQL: config.MySQLConfig{
 			Host: "127.0.0.1", Port: 1, User: "unreachable", Database: "myapp",
 			Pool: config.PoolConfig{MaxOpen: 1, MaxIdle: 1},
@@ -122,7 +403,12 @@ func startMetadataSession(t *testing.T) *mcp.ClientSession {
 		t.Fatalf("executor.New: %v", err)
 	}
 	t.Cleanup(func() { _ = ex.Close() })
-	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), ex, nil)
+	logger, err := audit.NewLogger(testProfileName, config.AuditConfig{RingBufferSize: 10})
+	if err != nil {
+		t.Fatalf("audit.NewLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	srv := Build(config.ResourcesConfig{}, singleProfile(cfg, ex, logger))
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	go func() { _ = srv.Run(ctx, serverTransport) }()
 
@@ -147,17 +433,16 @@ func startDisabledMetadataSession(t *testing.T, legacy bool) *mcp.ClientSession 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	disabled := false
-	cfg := &config.Config{
+	cfg := config.ProfileConfig{
 		MySQL: config.MySQLConfig{Database: "myapp"},
 		Security: config.SecurityConfig{
 			AllowedStatements: []string{"select"},
 			TableWhitelist:    []string{"myapp.*"},
 		},
-		Resources: config.ResourcesConfig{Enabled: &disabled},
 	}
 	// A nil executor makes any unexpected discovery call fail immediately instead
 	// of relying on an unreachable database or timing-sensitive assertions.
-	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), nil, nil)
+	srv := Build(config.ResourcesConfig{Enabled: &disabled}, singleProfile(cfg, nil, nil))
 	if legacy {
 		// Force the SDK client's documented fallback so it sends the legacy
 		// initialize request followed by notifications/initialized.
@@ -288,8 +573,8 @@ func TestResourcesDisabledDoesNotRegisterResourcesOrDiscoverMetadata(t *testing.
 			if err != nil {
 				t.Fatalf("ListTools: %v", err)
 			}
-			if len(tools.Tools) != 7 {
-				t.Fatalf("tool count = %d, want 7", len(tools.Tools))
+			if len(tools.Tools) != 8 {
+				t.Fatalf("tool count = %d, want 8", len(tools.Tools))
 			}
 			for _, tool := range tools.Tools {
 				if tool.Name != "mysql_query" {
@@ -324,7 +609,7 @@ func TestResourcesDisabledDoesNotRegisterResourcesOrDiscoverMetadata(t *testing.
 type testStack struct {
 	sess   *mcp.ClientSession
 	ex     *executor.Executor
-	cfg    *config.Config
+	cfg    *config.ProfileConfig
 	logger *audit.Logger
 }
 
@@ -353,7 +638,7 @@ func startStack(t *testing.T) *testStack {
 		t.Fatal(err)
 	}
 
-	cfg := &config.Config{
+	cfg := &config.ProfileConfig{
 		MySQL: config.MySQLConfig{
 			Host: host, Port: int(port.Num()),
 			User: "root", Password: "test", Database: "myapp",
@@ -385,13 +670,13 @@ func startStack(t *testing.T) *testStack {
 			t.Fatalf("seed: %v", err)
 		}
 	}
-	logger, err := audit.NewLogger(cfg.Audit)
+	logger, err := audit.NewLogger(testProfileName, cfg.Audit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { logger.Close() })
+	t.Cleanup(func() { _ = logger.Close() })
 
-	srv := Build(cfg, guard.New(cfg.Security, cfg.MySQL.Database), ex, logger)
+	srv := Build(config.ResourcesConfig{}, singleProfile(*cfg, ex, logger))
 	ct, st := mcp.NewInMemoryTransports()
 	go func() { _ = srv.Run(ctx, st) }()
 
@@ -406,6 +691,12 @@ func startStack(t *testing.T) *testStack {
 
 func callText(t *testing.T, sess *mcp.ClientSession, tool string, args map[string]any) (string, bool) {
 	t.Helper()
+	if tool != "list_profile" {
+		args = maps.Clone(args)
+		if _, ok := args["profile"]; !ok {
+			args["profile"] = testProfileName
+		}
+	}
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
 		t.Fatalf("CallTool(%s): %v", tool, err)
@@ -426,7 +717,7 @@ func TestE2E(t *testing.T) {
 
 	t.Run("查询白名单内的表", func(t *testing.T) {
 		res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
-			Name: "mysql_query", Arguments: map[string]any{"sql": "SELECT id, name FROM t1 ORDER BY id"},
+			Name: "mysql_query", Arguments: map[string]any{"profile": testProfileName, "sql": "SELECT id, name FROM t1 ORDER BY id"},
 		})
 		if err != nil {
 			t.Fatalf("CallTool: %v", err)
@@ -490,11 +781,9 @@ func TestE2E(t *testing.T) {
 func TestE2EResourcesDisabledKeepsToolsUsable(t *testing.T) {
 	stack := startStack(t)
 	cfg := *stack.cfg
-	cfg.Resources = config.ResourcesConfig{}
 	disabled := false
-	cfg.Resources.Enabled = &disabled
 
-	srv := Build(&cfg, guard.New(cfg.Security, cfg.MySQL.Database), stack.ex, stack.logger)
+	srv := Build(config.ResourcesConfig{Enabled: &disabled}, singleProfile(cfg, stack.ex, stack.logger))
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -520,7 +809,7 @@ func TestE2EResourcesDisabledKeepsToolsUsable(t *testing.T) {
 		t.Fatalf("mysql_describe_table after disabling resources: isErr=%v text=%s", isErr, text)
 	}
 	query, err := sess.CallTool(ctx, &mcp.CallToolParams{
-		Name: "mysql_query", Arguments: map[string]any{"sql": "SELECT name FROM t1 ORDER BY id"},
+		Name: "mysql_query", Arguments: map[string]any{"profile": testProfileName, "sql": "SELECT name FROM t1 ORDER BY id"},
 	})
 	if err != nil {
 		t.Fatalf("mysql_query after disabling resources: %v", err)
@@ -538,5 +827,167 @@ func TestE2EResourcesDisabledKeepsToolsUsable(t *testing.T) {
 	}
 	if payload.RowCount != 2 || len(payload.Rows) != 2 || payload.Rows[0][0] != "alice" {
 		t.Fatalf("mysql_query structured result after disabling resources = %+v", payload)
+	}
+}
+
+func startProfileDatabase(t *testing.T, description, label, extraColumn string, allowed []string, maxRows, maxScriptStatements int) (config.ProfileConfig, *executor.Executor) {
+	t.Helper()
+	ctx := context.Background()
+	container, err := tcmysql.Run(ctx, "mysql:8.0.45",
+		tcmysql.WithDatabase("myapp"),
+		tcmysql.WithUsername("root"),
+		tcmysql.WithPassword("test"),
+	)
+	if err != nil {
+		t.Fatalf("start MySQL for %s: %v", description, err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := container.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.ProfileConfig{
+		Description: description,
+		MySQL: config.MySQLConfig{
+			Host: host, Port: int(port.Num()), User: "root", Password: "test", Database: "myapp",
+			Pool: config.PoolConfig{MaxOpen: 5, MaxIdle: 2},
+		},
+		Security: config.SecurityConfig{
+			AllowedStatements:   allowed,
+			TableWhitelist:      []string{"myapp.*"},
+			MaxRows:             maxRows,
+			QueryTimeout:        config.Duration(30 * time.Second),
+			MaxScriptStatements: maxScriptStatements,
+		},
+		Audit: config.AuditConfig{RingBufferSize: 100, SlowQueryThreshold: config.Duration(time.Second)},
+	}
+	ex, err := executor.New(cfg.MySQL, cfg.Security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ex.Close() })
+	for _, statement := range []string{
+		"CREATE TABLE shared (id INT PRIMARY KEY, label VARCHAR(32), " + extraColumn + ")",
+		"INSERT INTO shared (id, label) VALUES (1, '" + label + "')",
+	} {
+		if _, err := ex.Execute(ctx, statement); err != nil {
+			t.Fatalf("seed %s: %v", description, err)
+		}
+	}
+	for id := 2; id <= maxRows+1; id++ {
+		if _, err := ex.Execute(ctx, "INSERT INTO shared (id, label) VALUES ("+strconv.Itoa(id)+", '"+label+"-extra')"); err != nil {
+			t.Fatalf("seed extra row for %s: %v", description, err)
+		}
+	}
+	return cfg, ex
+}
+
+func callProfileText(t *testing.T, sess *mcp.ClientSession, tool, profileName string, args map[string]any) (string, bool) {
+	t.Helper()
+	args = maps.Clone(args)
+	args["profile"] = profileName
+	return callText(t, sess, tool, args)
+}
+
+func TestE2EProfilesRouteIndependentDatabases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E needs Docker; run without -short")
+	}
+	alphaCfg, alphaExecutor := startProfileDatabase(t, "Alpha database", "alpha-row", "alpha_only INT", []string{"select", "insert", "update", "delete"}, 10, 5)
+	betaCfg, betaExecutor := startProfileDatabase(t, "Beta database", "beta-row", "beta_only VARCHAR(16), INDEX beta_only_idx (beta_only)", []string{"select"}, 5, 1)
+	alphaLogger, err := audit.NewLogger("alpha", alphaCfg.Audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = alphaLogger.Close() })
+	betaLogger, err := audit.NewLogger("beta", betaCfg.Audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = betaLogger.Close() })
+	provider := &testProfileProvider{runtimes: map[string]*profile.Runtime{
+		"alpha": testRuntime("alpha", alphaCfg, alphaExecutor, alphaLogger),
+		"beta":  testRuntime("beta", betaCfg, betaExecutor, betaLogger),
+	}}
+	srv := Build(config.ResourcesConfig{}, provider)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go func() { _ = srv.Run(ctx, serverTransport) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "profile-e2e", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	queryText, queryErr := callProfileText(t, session, "mysql_query", "alpha", map[string]any{"sql": "SELECT label FROM shared"})
+	if queryErr || !strings.Contains(queryText, "alpha-row") || strings.Contains(queryText, "beta-row") {
+		t.Fatalf("alpha query routed incorrectly: isErr=%v text=%s", queryErr, queryText)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_execute", "alpha", map[string]any{"sql": "UPDATE shared SET label = 'alpha-write' WHERE id = 1"}); isErr || !strings.Contains(text, "1 rows affected") {
+		t.Fatalf("alpha execute: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_script", "alpha", map[string]any{"script": "UPDATE shared SET label = 'alpha-script' WHERE id = 1; SELECT label FROM shared WHERE id = 1"}); isErr || !strings.Contains(text, "COMMIT") || !strings.Contains(text, "alpha-script") {
+		t.Fatalf("alpha script: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_script", "alpha", map[string]any{"script": "UPDATE shared SET label = 'rolled-back' WHERE id = 1; INSERT INTO shared (id, label) VALUES (1, 'duplicate')"}); !isErr || !strings.Contains(text, "ROLLBACK") {
+		t.Fatalf("alpha failed script: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_query", "alpha", map[string]any{"sql": "SELECT label FROM shared"}); isErr || !strings.Contains(text, "alpha-script") || strings.Contains(text, "rolled-back") {
+		t.Fatalf("alpha rollback: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_list_tables", "beta", map[string]any{}); isErr || !strings.Contains(text, "myapp.shared") {
+		t.Fatalf("beta list tables: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_describe_table", "beta", map[string]any{"table": "shared"}); isErr || !strings.Contains(text, "beta_only") || strings.Contains(text, "alpha_only") {
+		t.Fatalf("beta describe: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_explain", "beta", map[string]any{"sql": "SELECT beta_only FROM shared WHERE beta_only = 'missing'", "format": "tree"}); isErr || !strings.Contains(text, "beta_only_idx") {
+		t.Fatalf("beta explain: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_execute", "beta", map[string]any{"sql": "UPDATE shared SET label = 'wrong-profile' WHERE id = 1"}); !isErr || !strings.Contains(text, "statement_not_enabled") {
+		t.Fatalf("beta write policy: isErr=%v text=%s", isErr, text)
+	}
+	if text, isErr := callProfileText(t, session, "mysql_query", "beta", map[string]any{"sql": "SELECT label FROM shared"}); isErr || !strings.Contains(text, "beta-row") || !strings.Contains(text, "truncated") || strings.Contains(text, "alpha-script") {
+		t.Fatalf("beta remained isolated: isErr=%v text=%s", isErr, text)
+	}
+	for _, expected := range []struct {
+		profileName string
+		mustContain string
+	}{{"alpha", `"profile": "alpha"`}, {"beta", `"profile": "beta"`}} {
+		text, isErr := callProfileText(t, session, "mysql_stats", expected.profileName, map[string]any{})
+		if isErr || !strings.Contains(text, expected.mustContain) {
+			t.Fatalf("%s stats: isErr=%v text=%s", expected.profileName, isErr, text)
+		}
+	}
+
+	resources, err := session.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alphaURI, betaURI string
+	for _, resource := range resources.Resources {
+		switch resource.URI {
+		case "mysql:///schema/alpha/myapp/shared":
+			alphaURI = resource.URI
+		case "mysql:///schema/beta/myapp/shared":
+			betaURI = resource.URI
+		}
+	}
+	if alphaURI == "" || betaURI == "" {
+		t.Fatalf("profile resources missing: %#v", resources.Resources)
+	}
+	alphaDDL, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: alphaURI})
+	if err != nil || !strings.Contains(alphaDDL.Contents[0].Text, "alpha_only") {
+		t.Fatalf("alpha resource: result=%#v err=%v", alphaDDL, err)
+	}
+	betaDDL, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: betaURI})
+	if err != nil || !strings.Contains(betaDDL.Contents[0].Text, "beta_only") {
+		t.Fatalf("beta resource: result=%#v err=%v", betaDDL, err)
 	}
 }

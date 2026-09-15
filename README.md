@@ -20,9 +20,10 @@ This project puts the security boundary on **real SQL semantic parsing** instead
 
 ## Highlights
 
+- **Independent connection profiles** — one process manages multiple MySQL connections, each with its own pool, security rules, audit files, and statistics. Discover names and descriptions with `list_profile`, then pass an explicit `profile` to every SQL tool.
 - **Statement-class gating** — `SELECT` / `INSERT` / `UPDATE` / `DELETE` / DDL are individually switchable; the default is read-only. `SET`, `GRANT`, `CALL`, `USE`, `LOAD DATA`, `LOCK TABLES`, and transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`) are rejected unconditionally — classification itself is an allowlist, so unknown statement types land on the deny side by construction.
 - **Default-deny table whitelist** — nothing is visible until whitelisted; patterns like `db.*`, `db.table`, `app_*.logs` (glob per side, case-insensitive). Every table reference is extracted from the AST: JOINs, subqueries, derived tables, CTEs (scope-aware — a CTE name can't shadow a real table to smuggle it past the check), multi-table DML, `INSERT ... SELECT`, and versioned comments.
-- **MCP table-schema resources** — after the MCP connection initializes, every privilege-visible, whitelisted base table is exposed as `mysql:///schema/{database}/{table}`. Reading a resource returns live `SHOW CREATE TABLE` SQL with only the volatile table-level `AUTO_INCREMENT=N` counter removed.
+- **MCP table-schema resources** — after the MCP connection initializes, every privilege-visible, whitelisted base table is exposed as `mysql:///schema/{profile}/{database}/{table}`. Reading a resource returns live `SHOW CREATE TABLE` SQL with only the volatile table-level `AUTO_INCREMENT=N` counter removed.
 - **Execution guardrails** — hard row cap, per-query timeout, single-statement enforcement, and a tripwire for `UPDATE`/`DELETE` without `WHERE`.
 - **Built-in observability** — per-query latency and row counts, slow-query flagging, and a `mysql_stats` tool so you can ask "which query was slowest?" right in the conversation.
 - **Structured audit, opt-in** — JSONL with daily rotation; denied SQL is recorded with the exact rule that fired. Off by default: no log files unless you enable it.
@@ -33,29 +34,34 @@ This project puts the security boundary on **real SQL semantic parsing** instead
 
 ## Tools
 
+All seven `mysql_*` tools require a non-empty `profile` string matching a configured name. There is no default connection: missing or unknown profiles are rejected before database access. `mysql_describe_table` defaults its optional `database` argument to the selected profile's database.
+
 | Tool | What it does |
 |---|---|
+| `list_profile` | No arguments; return names and descriptions sorted by name as text and structured `{profiles: [{name, description}]}`; no connection probe or credentials |
 | `mysql_query` | Run one read-only statement (`SELECT` / `SHOW` / `DESCRIBE` / `EXPLAIN`) |
 | `mysql_execute` | Run one write statement (`INSERT` / `UPDATE` / `DELETE` / DDL — each type must be enabled in config); returns affected rows |
 | `mysql_script` | Run a `;`-separated multi-statement script atomically in one transaction — all-or-nothing; DDL banned |
 | `mysql_explain` | Execution plan for a single `SELECT` (`format`: `traditional` / `json` / `tree`; `analyze: true` runs `EXPLAIN ANALYZE`) |
 | `mysql_list_tables` | List the base tables visible through the whitelist |
 | `mysql_describe_table` | Column structure of a whitelisted table |
-| `mysql_stats` | Session stats: totals / denials, average & P95 latency, top-N slow queries, per-table access counts |
+| `mysql_stats` | Selected profile's process-lifetime stats window: profile name, totals / denials, average & P95 latency, top-N slow queries, per-table access counts |
+
+For example, call `list_profile` with `{}`, then `mysql_query` with `{"profile":"dev","sql":"SELECT * FROM myapp.orders LIMIT 10"}` or `mysql_stats` with `{"profile":"dev","top_n":5}`. Keep the same profile when inspecting, changing, and verifying data.
 
 ## Resources
 
-The server takes one table snapshot when the MCP connection is initialized and registers one direct resource per visible base table:
+The server takes a table snapshot for each profile during MCP initialization/discovery and registers one direct resource per visible base table. Resource names also identify the profile, so identical database and table names on different servers stay distinct:
 
 | URI | MIME type | Content |
 |---|---|---|
-| `mysql:///schema/{database}/{table}` | `application/sql` | Current normalized `SHOW CREATE TABLE` output |
+| `mysql:///schema/{profile}/{database}/{table}` | `application/sql` | Current normalized `SHOW CREATE TABLE` output |
 
-"Visible" is the intersection of what the configured MySQL account can see and `security.table_whitelist`. Views are not registered. Resource discovery is not capped by `security.max_rows`, and resource reads remain available even when `select` is absent from `allowed_statements`, because both operations execute fixed server-owned metadata SQL rather than user-submitted SQL.
+"Visible" is the intersection of what the profile's MySQL account can see and its `security.table_whitelist`. Views are not registered. Resource discovery is not capped by `security.max_rows`, and resource reads remain available even when `select` is absent from `allowed_statements`, because both operations execute fixed server-owned metadata SQL rather than user-submitted SQL.
 
-The resource **set** is a connection-time snapshot: a table created later appears after reconnecting, while a dropped or newly inaccessible table returns MCP Resource Not Found. The resource **content** is live, so `ALTER TABLE` is reflected on the next read. Resource discovery and reads do not enter the audit log or `mysql_stats`; initialization failures are written to stderr and leave an empty resource list without disabling the tools.
+The resource **set** is a discovery-time snapshot: a table created later appears after the next discovery or reconnect, while a dropped or newly inaccessible table returns MCP Resource Not Found. The resource **content** is live, so `ALTER TABLE` is reflected on the next read. Resource discovery and reads do not enter the audit log or `mysql_stats`; a discovery failure is logged with the profile name and clears only that profile's table resources; other profiles, tools, and the shared query-results App remain available.
 
-Set `resources.enabled: false` to disable the entire resource feature. It defaults to `true`; when disabled, the server does not advertise Resources, register table or MCP App resources, or query MySQL during initialization/discovery. The interactive MCP App is therefore unavailable, while all seven tools, including `mysql_query`'s text and structured results, remain available.
+The root-level `resources.enabled` switch applies to every profile. Set it to `false` to disable the entire resource feature. It defaults to `true`; when disabled, the server does not advertise Resources, register table or MCP App resources, or query any profile's MySQL during initialization/discovery. The interactive MCP App is therefore unavailable, while all eight tools, including `mysql_query`'s text and structured results, remain available.
 
 ## Quick start
 
@@ -85,18 +91,25 @@ cp config.example.yaml ~/.mcp-server-mysql/config.yaml
 A minimal config:
 
 ```yaml
-mysql:
-  host: 127.0.0.1
-  port: 3306
-  user: mcp_dev                  # use a dedicated least-privilege account, not root
-  password: ${MYSQL_MCP_PASSWORD}
-  database: myapp
+resources:
+  enabled: true
+profiles:
+  dev:
+    description: Development database
+    mysql:
+      host: 127.0.0.1
+      port: 3306
+      user: mcp_dev                  # use a dedicated least-privilege account, not root
+      password: ${MYSQL_MCP_PASSWORD}
+      database: myapp
 
-security:
-  allowed_statements: [select]   # add insert/update/delete/ddl only if you need them
-  table_whitelist:
-    - "myapp.*"
+    security:
+      allowed_statements: [select]   # add insert/update/delete/ddl only if you need them
+      table_whitelist:
+        - "myapp.*"
 ```
+
+Add sibling entries under `profiles` for other connections; each accepts the same `mysql`, `security`, and `audit` fields. The annotated example includes two profiles. The client examples below use this minimal config; for other configurations, pass every referenced password environment variable to the MCP process.
 
 ### 3. Wire up your MCP client
 
@@ -147,9 +160,11 @@ claude mcp add mysql --env MYSQL_MCP_PASSWORD=your-password -- \
 
 ## Interactive query results (MCP Apps)
 
-`mysql_query` advertises the embedded `ui://mcp-server-mysql/query-results` resource to hosts that support [MCP Apps](https://github.com/modelcontextprotocol/ext-apps). Successful calls include both the existing human-readable text and structured query data, so older or text-only hosts degrade without losing any result information. The other six tools remain text-only.
+`mysql_query` advertises the embedded `ui://mcp-server-mysql/query-results` resource to hosts that support [MCP Apps](https://github.com/modelcontextprotocol/ext-apps). Successful calls include both the existing human-readable text and structured query data with a required `profile` field, so older or text-only hosts degrade without losing any result information. Query errors retain their text and carry the original `{profile, sql}` in result metadata so the App can identify the request. `list_profile` also returns text and structured data; the six remaining tools use text results.
 
-The result view keeps up to 20 snapshots inside the current View, supports global and optional `status` filtering, natural numeric sorting, column visibility, row selection, and TSV/CSV/JSON copy. Refresh invokes `mysql_query` again through the host; if the host does not expose tool calling to apps, the view explains that refresh is unavailable while all read-only controls continue to work. View history is memory-only and disappears when the View closes.
+The result view keeps up to 20 snapshots inside the current View, supports global and optional `status` filtering, natural numeric sorting, column visibility, row selection, and TSV/CSV/JSON copy. Results and history identify their profile, including failed and cancelled requests. Refresh invokes `mysql_query` through the host with the selected snapshot's original `{profile, sql}`, including after switching history; if the host does not expose tool calling to apps, the view explains that refresh is unavailable while all read-only controls continue to work. View history is memory-only and disappears when the View closes.
+
+When overlapping requests receive a Host error or cancellation without enough information to identify the request, history marks its source as undetermined and preserves the candidate inputs. It does not assign that notification to a profile based on arrival order.
 
 ### Local Basic Host development
 
@@ -172,11 +187,13 @@ Connect the official Basic Host to `http://127.0.0.1:3001/mcp`. The HTTP listene
                                ▼
 ┌───────────────────────  mcp-server-mysql  ───────────────────────┐
 │                                                                  │
-│  Table resources: mysql:///schema/{database}/{table}             │
+│  Table resources: mysql:///schema/{profile}/{database}/{table}  │
 │  fixed metadata SQL · base tables only · whitelist-filtered      │
 │                                                                  │
 │  mysql_query · mysql_execute · mysql_script · mysql_explain      │
 │  mysql_list_tables · mysql_describe_table · mysql_stats          │
+│  required profile → Manager.Get → independent runtime           │
+│  list_profile → configured names/descriptions (no database IO)  │
 │                             │                                    │
 │                             ▼                                    │
 │  ┌ Layer 1 · AST main gate (TiDB parser) ───────────────────┐    │
@@ -245,12 +262,15 @@ Security documentation you can't verify is marketing. The precise boundaries:
 
 ## Configuration
 
+`profiles` is a non-empty map. Names must match `[a-z0-9][a-z0-9_-]*`; `description` is optional and defaults to an empty string. Each profile independently applies the same defaults, without inheriting from other profiles. In the table below, `mysql.*`, `security.*`, `audit.*`, and `description` live under `profiles.<name>`; only `resources.enabled` is global.
+
 Full annotated example: [config.example.yaml](config.example.yaml). The governing principle is **secure by default**: omit `allowed_statements` and you're read-only; omit `table_whitelist` and everything is denied; leave `block_unfiltered_writes` unset and it's on.
 
 And it **fails closed at startup**: an unreadable file, an unknown/misspelled key, an invalid duration, a malformed whitelist pattern, an unknown statement type, a negative script cap, or a missing `mysql.user`/`mysql.database` all abort the process — it refuses to run sick rather than degrade silently.
 
 | Key | Default | Notes |
 |---|---|---|
+| `description` | `""` | Human-readable connection purpose, returned by `list_profile` |
 | `mysql.host` | `127.0.0.1` | Use `host.docker.internal` from inside Docker |
 | `mysql.port` | `3306` | |
 | `mysql.user` | — required | Dedicated least-privilege account recommended |
@@ -271,14 +291,23 @@ And it **fails closed at startup**: an unreadable file, an unknown/misspelled ke
 
 Secrets never need to live in the file: the whole config is passed through environment-variable expansion before parsing, so `${ENV_VAR}` works in **any** field. The config path itself can come from the `MYSQL_MCP_CONFIG` environment variable instead of `--config`.
 
+### Migrating a single-connection config
+
+1. Move the old root `mysql`, `security`, and `audit` sections intact under a name such as `profiles.dev`; keep `resources` at the root.
+2. Add `profile` to all seven `mysql_*` tool calls. Use `list_profile` to discover available names. There is no implicit `default` profile, even with one connection.
+3. Restart the server and reconnect clients to refresh tool schemas and the new profile-qualified Resource URIs.
+
+Legacy root connection settings, empty/invalid profiles, and unknown configuration fields are rejected. Profiles are static until restart. Pool construction is lazy: an unreachable database fails when that profile's tools/resources access it, while `list_profile` still lists the configured entry. A SQL statement or script uses one profile; existing whitelist-approved cross-schema access within that connection remains available. Cross-profile transactions and runtime profile management are not supported.
+
 ## Audit log
 
-Disk logging is controlled by `audit.enabled` — **default `false`: no log files, no log directory created**. Session statistics (`mysql_stats`) are backed by an in-memory ring buffer and work either way (reset on restart).
+Disk logging is controlled independently by each profile's `audit.enabled` — **default `false`: no log files, no log directory created**. Each profile has its own in-memory statistics ring and slow-query threshold; `mysql_stats` reads only the requested profile's window and includes its name. Statistics are shared by callers using that profile in the process, work regardless of disk logging, and reset on restart.
 
-When enabled, JSONL files rotate daily (`audit-2026-07-02.jsonl`), one JSON object per line:
+When enabled, JSONL files rotate daily as `audit-<profile>-<YYYY-MM-DD>.jsonl` (for example, `audit-dev-2026-09-15.jsonl`). Profiles can share `audit.log_dir` without sharing files. Each line is one JSON object:
 
 | Field | Meaning |
 |---|---|
+| `profile` | Owning connection profile, filled by its logger |
 | `ts` / `tool` / `sql` | Timestamp, tool name, original SQL |
 | `decision` / `rule` | `allowed` or `denied`, and the rule that fired on denial |
 | `class` / `tables` | Statement class, referenced tables |
@@ -297,12 +326,13 @@ cp -r skills/mysql-mcp ~/.claude/skills/
 
 - **MySQL 8.x** — the E2E suite runs against MySQL 8.0 (8.0.45) via testcontainers. MySQL 5.7 and MariaDB are untested.
 - **MCP** — Go SDK v1.7.0, with direct MySQL table-schema resources, the `io.modelcontextprotocol/ui` extension, and one embedded MCP App resource. Text fallback remains available to hosts without MCP Apps.
-- **Transport** — stdio by default; loopback-only stateless Streamable HTTP is available for local development. Server identity is `mcp-server-mysql`; it exposes 7 tools, direct table-schema resources, one UI resource, and no prompts.
+- **Transport** — stdio by default; loopback-only stateless Streamable HTTP is available for local development. Server identity is `mcp-server-mysql`; it exposes 8 tools, direct table-schema resources, one shared UI resource, and no prompts.
 
 ## Development
 
 ```bash
 go test ./... -short           # unit tests (no Docker needed)
+go test -race ./... -short     # concurrency checks, including profile isolation
 go test ./... -timeout 600s    # full suite incl. testcontainers integration/E2E (needs Docker)
 
 cd ui/query-results

@@ -10,13 +10,17 @@ import {
   applyHostStyleVariables,
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
-import type { ToolResultLike } from "./model";
+import { parseQueryInput, type QueryInput, type ToolResultLike } from "./model";
 
 export type MCPHandlers = {
-  onToolInput: (sql: string) => void;
+  onToolInput: (input: QueryInput | null) => void;
   onToolResult: (result: ToolResultLike) => void;
   onToolCancelled: (reason?: string) => void;
 };
+
+export function toolInputFromEvent(params: { arguments?: Record<string, unknown> }): QueryInput | null {
+  return parseQueryInput(params.arguments);
+}
 
 export type MCPAppState = {
   app: App | null;
@@ -67,16 +71,13 @@ export function useMcpApp(handlers: MCPHandlers): MCPAppState {
 
     let disposed = false;
     const app = new App(
-      { name: "mcp-server-mysql-query-results", version: "2.0.1" },
+      { name: "mcp-server-mysql-query-results", version: "2.1.0" },
       { availableDisplayModes: ["inline", "fullscreen"] },
       { autoResize: true, strict: true },
     );
 
-    const onInput = (params: { arguments?: Record<string, unknown> }) => {
-      handlersRef.current.onToolInput(
-        typeof params.arguments?.sql === "string" ? params.arguments.sql : "",
-      );
-    };
+    const onInput = (params: { arguments?: Record<string, unknown> }) =>
+      handlersRef.current.onToolInput(toolInputFromEvent(params));
     const onResult = (params: ToolResultLike) => handlersRef.current.onToolResult(params);
     const onCancelled = (params: { reason?: string }) =>
       handlersRef.current.onToolCancelled(params.reason);

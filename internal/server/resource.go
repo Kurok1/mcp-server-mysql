@@ -22,19 +22,24 @@ import (
 const tableResourceMIMEType = "application/sql"
 
 type tableResourceRegistry struct {
-	mu   sync.Mutex
-	uris []string
+	mu       sync.Mutex
+	profiles ProfileProvider
+	uris     map[string][]string
+}
+
+func newTableResourceRegistry(profiles ProfileProvider) *tableResourceRegistry {
+	return &tableResourceRegistry{profiles: profiles, uris: make(map[string][]string)}
 }
 
 // discoveryMiddleware refreshes the table-resource snapshot before the
 // 2026-07-28 server/discover response is assembled. That protocol version no
 // longer sends notifications/initialized, so the legacy InitializedHandler
 // alone would never register dynamic resources for modern clients.
-func (r *tableResourceRegistry) discoveryMiddleware(s *mcp.Server, d *deps) mcp.Middleware {
+func (r *tableResourceRegistry) discoveryMiddleware(s *mcp.Server) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "server/discover" {
-				r.load(ctx, s, d)
+				r.load(ctx, s)
 			}
 			return next(ctx, method, req)
 		}
@@ -45,34 +50,46 @@ func (r *tableResourceRegistry) discoveryMiddleware(s *mcp.Server, d *deps) mcp.
 // initialized MCP connection. It is deliberately synchronous: on the current
 // ordered stdio transport, a following resources/list request is handled only
 // after registration completes.
-func (r *tableResourceRegistry) load(ctx context.Context, s *mcp.Server, d *deps) {
+func (r *tableResourceRegistry) load(ctx context.Context, s *mcp.Server) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	tables, err := d.listVisibleBaseTables(ctx)
-	if len(r.uris) > 0 {
-		s.RemoveResources(r.uris...)
-		r.uris = nil
-	}
-	if err != nil {
-		slog.Error("failed to discover MySQL table resources", "err", err)
-		return
-	}
+	for _, info := range r.profiles.List() {
+		profileName := info.Name
+		if previous := r.uris[profileName]; len(previous) > 0 {
+			s.RemoveResources(previous...)
+			r.uris[profileName] = nil
+		}
 
-	r.uris = make([]string, 0, len(tables))
-	for _, table := range tables {
-		table := table
-		uri := tableResourceURI(table)
-		s.AddResource(&mcp.Resource{
-			URI:         uri,
-			Name:        table.Database + "." + table.Table,
-			Title:       table.Database + "." + table.Table,
-			Description: "MySQL table schema as normalized SHOW CREATE TABLE output.",
-			MIMEType:    tableResourceMIMEType,
-		}, d.tableResourceHandler(table))
-		r.uris = append(r.uris, uri)
+		runtime, err := r.profiles.Get(profileName)
+		if err != nil {
+			slog.Error("failed to resolve MySQL resource profile", "profile", profileName, "err", err)
+			continue
+		}
+		d := depsForRuntime(runtime)
+		tables, err := d.listVisibleBaseTables(ctx)
+		if err != nil {
+			slog.Error("failed to discover MySQL table resources", "profile", profileName, "err", err)
+			continue
+		}
+
+		uris := make([]string, 0, len(tables))
+		for _, table := range tables {
+			table := table
+			uri := tableResourceURI(profileName, table)
+			name := profileName + ": " + table.Database + "." + table.Table
+			s.AddResource(&mcp.Resource{
+				URI:         uri,
+				Name:        name,
+				Title:       name,
+				Description: "MySQL table schema as normalized SHOW CREATE TABLE output.",
+				MIMEType:    tableResourceMIMEType,
+			}, d.tableResourceHandler(table))
+			uris = append(uris, uri)
+		}
+		r.uris[profileName] = uris
+		slog.Info("MySQL table resources registered", "profile", profileName, "count", len(uris))
 	}
-	slog.Info("MySQL table resources registered", "count", len(r.uris))
 }
 
 func (d *deps) listVisibleBaseTables(ctx context.Context) ([]executor.TableRef, error) {
@@ -112,8 +129,8 @@ func (d *deps) listVisibleBaseTablesUpTo(ctx context.Context, maxRows int) ([]ex
 	return visible, truncated, nil
 }
 
-func tableResourceURI(table executor.TableRef) string {
-	return "mysql:///schema/" + url.PathEscape(table.Database) + "/" + url.PathEscape(table.Table)
+func tableResourceURI(profileName string, table executor.TableRef) string {
+	return "mysql:///schema/" + url.PathEscape(profileName) + "/" + url.PathEscape(table.Database) + "/" + url.PathEscape(table.Table)
 }
 
 func (d *deps) tableResourceHandler(table executor.TableRef) mcp.ResourceHandler {

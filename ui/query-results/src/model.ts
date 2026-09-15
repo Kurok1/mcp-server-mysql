@@ -4,10 +4,17 @@
  */
 
 export const MAX_HISTORY = 20;
+export const QUERY_INPUT_META_KEY = "io.github.kurok1.mcp-server-mysql/query-input";
+
+export type QueryInput = {
+  profile: string;
+  sql: string;
+};
 
 export type QueryResultPayload = {
   resultId: string;
   tool: "mysql_query";
+  profile: string;
   database: string;
   sql: string;
   tables: string[];
@@ -22,15 +29,18 @@ export type QueryResultPayload = {
 export type HistoryEntry = {
   id: string;
   status: "success" | "error" | "cancelled";
+  profile: string | null;
   sql: string;
   result?: QueryResultPayload;
   message?: string;
+  candidates?: QueryInput[];
   recordedAt: string;
 };
 
 export type ToolResultLike = {
   content?: Array<{ type?: string; text?: string }>;
   structuredContent?: unknown;
+  _meta?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -63,6 +73,7 @@ export function parseQueryPayload(value: unknown): QueryResultPayload | null {
   if (
     typeof data.resultId !== "string" ||
     data.tool !== "mysql_query" ||
+    !isProfile(data.profile) ||
     typeof data.database !== "string" ||
     typeof data.sql !== "string" ||
     !Array.isArray(data.tables) ||
@@ -90,16 +101,28 @@ export function parseQueryPayload(value: unknown): QueryResultPayload | null {
   return data as QueryResultPayload;
 }
 
+export function isProfile(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function parseQueryInput(value: unknown): QueryInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  if (!isProfile(data.profile) || typeof data.sql !== "string") return null;
+  return { profile: data.profile, sql: data.sql };
+}
+
 export function historyEntryFromToolResult(
   result: ToolResultLike,
-  fallbackSQL = "",
+  input: QueryInput,
 ): HistoryEntry {
   const recordedAt = new Date().toISOString();
   if (result.isError) {
     return {
       id: transientId("error"),
       status: "error",
-      sql: fallbackSQL,
+      profile: input.profile,
+      sql: input.sql,
       message: extractText(result),
       recordedAt,
     };
@@ -110,7 +133,8 @@ export function historyEntryFromToolResult(
     return {
       id: transientId("error"),
       status: "error",
-      sql: fallbackSQL,
+      profile: input.profile,
+      sql: input.sql,
       message: "The server returned an invalid query result.",
       recordedAt,
     };
@@ -119,18 +143,36 @@ export function historyEntryFromToolResult(
   return {
     id: payload.resultId,
     status: "success",
+    profile: payload.profile,
     sql: payload.sql,
     result: payload,
     recordedAt: payload.executedAt,
   };
 }
 
-export function cancelledHistoryEntry(sql: string, reason?: string): HistoryEntry {
+export function cancelledHistoryEntry(input: QueryInput, reason?: string): HistoryEntry {
   return {
     id: transientId("cancelled"),
     status: "cancelled",
-    sql,
+    profile: input.profile,
+    sql: input.sql,
     message: reason || "Query cancelled",
+    recordedAt: new Date().toISOString(),
+  };
+}
+
+export function unattributedHistoryEntry(
+  status: "error" | "cancelled",
+  candidates: QueryInput[],
+  reason?: string,
+): HistoryEntry {
+  return {
+    id: transientId(status),
+    status,
+    profile: null,
+    sql: "",
+    message: reason || (status === "cancelled" ? "Query cancelled" : "Query failed"),
+    candidates,
     recordedAt: new Date().toISOString(),
   };
 }
@@ -203,6 +245,7 @@ export function serializeRows(
 export const previewResult: QueryResultPayload = {
   resultId: "preview-query-results-v2",
   tool: "mysql_query",
+  profile: "analytics-readonly",
   database: "analytics",
   sql: "SELECT customer, plan, mrr, status, owner, updated FROM accounts ORDER BY updated DESC LIMIT 100",
   tables: ["analytics.accounts"],
